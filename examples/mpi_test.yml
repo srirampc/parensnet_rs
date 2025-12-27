@@ -1,0 +1,6 @@
+hdf_in: "data/adata.20k.500.H100.par_puc.h5"
+hdf_out: "data/test_write.h5"
+hdf_out2: "data/test_write2.h5"
+nsamples: 4
+nrounds: 6
+nvars: 500

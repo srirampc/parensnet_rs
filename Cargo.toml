@@ -1,0 +1,31 @@
+[package]
+name = "parensnet_rs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+itertools = "0.14.0"
+hdf5-metno = { path = "ext/hdf5-rust/hdf5", features = ["mpio"] }
+ndarray = { version = "0.17.1", features = ["serde", "approx"] }
+ndarray-rand = "0.16.0"
+num = "0.4"
+mpi = { version = "0.8.0", features = ["user-operations", "derive"] }
+rand = "0.9.2"
+serde = { version = "1.0.228", features = ["derive", "std"] }
+serde_json = "1.0"
+serde-saphyr = "0.0.10"
+log = "0.4.28"
+env_logger = "0.11.8"
+clap = { version = "4.5.53", features = ["derive"] }
+flate2 = "1.1.5"
+lazy_static = "1.5.0"
+
+[dev-dependencies]
+env_logger = "0.11.8"
+
+
+# hdf5-sys = { package = "hdf5-metno-sys", version = "0.10.1" }
+# hdf5 = { package = "hdf5-metno", version = "0.10.0", features = ["mpio"] }
+# hdf5-metno = { git = "https://github.com/metno/hdf5-rust.git", features = [
+#     "mpio",
+# ] }

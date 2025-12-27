@@ -1,0 +1,3 @@
+[submodule "ext/hdf5-rust"]
+	path = ext/hdf5-rust
+	url = https://github.com/srirampc/hdf5-rust.git
