@@ -396,7 +396,6 @@ where
         Ok((pij_factor - (self.get_lmr_minsum(i, j)? / mij))
             + (pji_factor - (self.get_lmr_minsum(j, i)? / mij)))
     }
-
 }
 
 impl<IntT, FloatT> MISIPair<IntT, FloatT>
@@ -418,7 +417,7 @@ where
         ];
         // read mi
         let mi: FloatT =
-            read1d_point(&data_g, "mi", triu_pair_to_index(npairs, pi, pj))?;
+            read1d_point(&data_g, "mi", triu_pair_to_index(nvars, pi, pj))?;
         // start points of pair pi, pj
         let (hist_dim, hist_start, si_start) = map_with_result_to_tuple![
             |x| read1d_pair_of_points::<IntT, usize>(&data_g, x, (pi, pj)) ;
@@ -462,7 +461,7 @@ where
 
     pub fn set_lmr_ds(
         &mut self,
-        subset_var: Option<Vec<IntT>>,
+        subset_var: Option<&[IntT]>,
     ) -> Result<(), Error> {
         let vpair = self.var_pair.map(|x| IntT::from_usize(*x).unwrap());
         if let Some(sv_vec) = subset_var {
@@ -643,14 +642,16 @@ mod tests {
     use log::debug;
     use std::collections::HashMap;
 
-    use super::{MISIPair, MISIRangePair};
-    use crate::mvim::rv::MRVTrait;
+    use super::{LMRDSPair, MISIPair, MISIRangePair};
+    use crate::mvim::rv::{Error, MRVTrait};
     use crate::test_data_file_path;
     use crate::util::GenericError;
 
     lazy_static! {
         static ref MISI_H5: &'static str =
             test_data_file_path!("adata.20k.500.misidata.h5");
+        static ref PAIRS_LIST: Vec<(i32, i32)> =
+            vec![(0, 1), (0, 2), (0, 3), (0, 4), (0, 5)];
         static ref PAIRS_MI_PUC: HashMap<(i32, i32), (f32, f32)> =
             HashMap::from([
                 ((0, 1), (0.31067935, 60.68014)),
@@ -659,10 +660,60 @@ mod tests {
                 ((0, 4), (0.7714661, 128.89265)),
                 ((0, 5), (0.82867515, 141.27827)),
             ]);
+        static ref SAMPLES_LIST: Vec<Vec<i32>> = vec![
+            vec![
+                11, 38, 149, 162, 169, 172, 183, 209, 222, 255, 258, 307, 324,
+                354, 361, 370, 374, 412, 455, 491
+            ],
+            vec![
+                0, 5, 45, 104, 106, 140, 153, 154, 178, 227, 229, 248, 278, 314,
+                338, 356, 412, 431, 477, 495
+            ],
+        ];
+        static ref SAMPLES_PUC: HashMap<(i32, i32), Vec<f32>> = HashMap::from([
+            ((0, 1), vec![1.769476, 2.728235]),
+            ((0, 2), vec![10.56831, 9.400658]),
+            ((0, 3), vec![22.529241, 19.741033]),
+            ((0, 4), vec![6.253071, 5.8040924]),
+            ((0, 5), vec![7.0357942, 6.366231]),
+        ]);
+        static ref PAIRS_LIST2: Vec<(i32, i32)> =
+            vec![(0, 1), (0, 5), (1, 5), (0, 45)];
+        static ref PAIRS_MI_PUC2: HashMap<(i32, i32), (f32, f32)> =
+            HashMap::from([
+                ((0, 1), (0.3106793, 60.680137)),
+                ((0, 5), (0.8286751, 141.27827)),
+                ((1, 5), (0.5558097, 200.69673)),
+                ((0, 45), (1.684678, 294.56713)),
+            ]);
+        static ref SAMPLES_LIST2: Vec<Vec<i32>> = vec![
+            vec![
+                5, 45, 104, 106, 140, 153, 154, 178, 227, 229, 248, 278, 314,
+                338, 356, 412, 431, 477, 495
+            ],
+            vec![
+                0, 5, 45, 104, 106, 140, 153, 154, 178, 227, 229, 248, 278, 314,
+                338, 356, 412, 431, 477, 495
+            ],
+            vec![
+                1, 5, 45, 104, 106, 140, 153, 154, 178, 227, 229, 248, 278, 314,
+                338, 356, 412, 431, 477, 495
+            ],
+            vec![
+                0, 1, 5, 45, 104, 106, 140, 153, 154, 178, 227, 229, 248, 278,
+                314, 338, 356, 412, 431, 477, 495
+            ],
+        ];
+        static ref SAMPLES_PUC2: HashMap<(i32, i32), Vec<f32>> = HashMap::from([
+            ((0, 1), vec![2.72823, 2.72823, 2.72823, 2.72823]),
+            ((0, 5), vec![6.36623, 6.36623, 7.57903, 7.57903]),
+            ((0, 45), vec![12.87396, 12.87396, 14.51176, 14.51176]),
+            ((1, 5), vec![7.06674, 7.94825, 7.06674, 7.94825]),
+        ]);
     }
 
     #[test]
-    pub fn test_misi_pair() -> Result<(), GenericError> {
+    pub fn test_misi_pair_full() -> Result<(), GenericError> {
         crate::tests::log_init();
         for ((pi, pj), (rmi, rpuc)) in PAIRS_MI_PUC.iter() {
             let (i, j) = (*pi, *pj);
@@ -686,7 +737,7 @@ mod tests {
     }
 
     #[test]
-    pub fn test_misi_range_pair() -> Result<(), GenericError> {
+    pub fn test_misi_range_pair_full() -> Result<(), GenericError> {
         crate::tests::log_init();
         let bprange = MISIRangePair::<i32, f32>::new(&MISI_H5, (0..6, 0..6))?;
         for ((pi, pj), (rmi, rpuc)) in PAIRS_MI_PUC.iter() {
@@ -707,5 +758,206 @@ mod tests {
         }
         Ok(())
     }
-    // TODO:: test MISIPair and MISIRangePair
+
+    #[test]
+    pub fn test_misi_pair_subset_minsum() -> Result<(), GenericError> {
+        crate::tests::log_init();
+        let (exp_fnm, exp_snm) = (5.9917197, 5.8857145);
+        let (i, j) = PAIRS_LIST[0];
+        let splist = SAMPLES_LIST[0].clone();
+        let mut bpair =
+            MISIPair::<i32, f32>::new(&MISI_H5, (i as usize, j as usize))?;
+        bpair.set_lmr_ds(Some(&splist))?;
+        if let Some(LMRDSPair::Subset(ref subset_dss)) = bpair.lmr_ds {
+            let (fmin, smin) = (
+                subset_dss.first.minsum(&bpair, j)?,
+                subset_dss.second.minsum(&bpair, i)?,
+            );
+            debug!("-> {:?} {} {} {}", (i, j), fmin, smin, fmin + smin);
+            let flmr_diff = (fmin - exp_fnm).abs() < 1e-3;
+            let slmr_diff = (smin - exp_snm).abs() < 1e-3;
+            assert!(flmr_diff);
+            assert!(slmr_diff);
+        } else {
+            return Err(GenericError::from(Error::Unexpected(
+                "LMRDSPair not initialized",
+            )));
+        }
+        let (fmm, smm) =
+            (bpair.get_lmr_minsum(i, j)?, bpair.get_lmr_minsum(j, i)?);
+        let flmr_diff = (fmm - exp_fnm).abs() < 1e-3;
+        let slmr_diff = (smm - exp_snm).abs() < 1e-3;
+        debug!("-> BPAIR MINSUM {} {} {}", fmm, smm, fmm + smm);
+        assert!(flmr_diff);
+        assert!(slmr_diff);
+        //
+        for (idx, rvlist) in SAMPLES_LIST2.iter().enumerate() {
+            bpair.set_lmr_ds(Some(rvlist))?;
+            if let Some(LMRDSPair::Subset(ref subset_dss)) = bpair.lmr_ds {
+                let (fmin, smin) = (
+                    subset_dss.first.minsum(&bpair, j)?,
+                    subset_dss.second.minsum(&bpair, i)?,
+                );
+                let rsum = fmin + smin;
+                debug!(" -> I {} {} {} {}", idx, fmin, smin, rsum);
+                // rsum == 10.958
+                let rsum_diff = (rsum - 10.958).abs() < 1e-3;
+                assert!(rsum_diff);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    pub fn test_misi_pair_subset_lmr1() -> Result<(), GenericError> {
+        crate::tests::log_init();
+        for ((i, j), puc_vec) in SAMPLES_PUC.iter() {
+            let mut bpair =
+                MISIPair::<i32, f32>::new(&MISI_H5, (*i as usize, *j as usize))?;
+            let (exp_mi, exp_puc) = PAIRS_MI_PUC[&(*i, *j)];
+            let fpuc = bpair.accumulate_redundancies(*i, *j)?;
+            for (idx, rvlist) in SAMPLES_LIST.iter().enumerate() {
+                bpair.set_lmr_ds(Some(rvlist))?;
+                let pucij = bpair.accumulate_redundancies_for(*i, *j, rvlist)?;
+                let mij = bpair.get_mi(*i, *j)?;
+                let lmrij = bpair.compute_lm_puc(*i, *j)?;
+                let msij = (
+                    bpair.get_lmr_minsum(*i, *j)?,
+                    bpair.get_lmr_minsum(*j, *i)?,
+                );
+                let rsum = msij.0 + msij.1;
+                debug!(
+                    " -> IJ {:?} {:?} {} {:?}",
+                    (i, j, idx),
+                    (mij, exp_mi, fpuc, exp_puc),
+                    rsum,
+                    (pucij, lmrij, puc_vec[idx])
+                );
+                let mi_diff = (mij - exp_mi).abs() < 1e-3;
+                let puc_diff = (fpuc - exp_puc).abs() < 1e-3;
+                let acc_diff = (pucij - puc_vec[idx]).abs() < 1e-3;
+                let lmr_diff = (lmrij - puc_vec[idx]).abs() < 1e-3;
+                assert!(mi_diff);
+                assert!(puc_diff);
+                assert!(acc_diff);
+                assert!(lmr_diff);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    pub fn test_misi_pair_subset_lmr2() -> Result<(), GenericError> {
+        crate::tests::log_init();
+        for ((i, j), puc_vec) in SAMPLES_PUC2.iter() {
+            let (exp_mi, exp_puc) = PAIRS_MI_PUC2[&(*i, *j)];
+            let mut bpair =
+                MISIPair::<i32, f32>::new(&MISI_H5, (*i as usize, *j as usize))?;
+            let fpuc = bpair.accumulate_redundancies(*i, *j)?;
+            for (idx, rvlist) in SAMPLES_LIST2.iter().enumerate() {
+                bpair.set_lmr_ds(Some(rvlist))?;
+                let pucij = bpair.accumulate_redundancies_for(*i, *j, rvlist)?;
+                let mij = bpair.get_mi(*i, *j)?;
+                let lmrij = bpair.compute_lm_puc(*i, *j)?;
+                let msij = (
+                    bpair.get_lmr_minsum(*i, *j)?,
+                    bpair.get_lmr_minsum(*j, *i)?,
+                );
+                let rsum = msij.0 + msij.1;
+                debug!(
+                    " --> IJ {:?} {:?} {} {:?}",
+                    (i, j, idx),
+                    (mij, exp_mi, fpuc, exp_puc),
+                    rsum,
+                    (pucij, lmrij, puc_vec[idx])
+                );
+                let puc_diff = (fpuc - exp_puc).abs() < 1e-3;
+                let mi_diff = (mij - exp_mi).abs() < 1e-3;
+                let acc_diff = (pucij - puc_vec[idx]).abs() < 1e-3;
+                let lmr_diff = (lmrij - puc_vec[idx]).abs() < 1e-3;
+                assert!(mi_diff);
+                assert!(puc_diff);
+                assert!(acc_diff);
+                assert!(lmr_diff);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    pub fn test_misi_range_pair_subset_lmr1() -> Result<(), GenericError> {
+        crate::tests::log_init();
+        let mut bprange = MISIRangePair::<i32, f32>::new(&MISI_H5, (0..6, 0..6))?;
+        for ((i, j), puc_vec) in SAMPLES_PUC.iter() {
+            let (exp_mi, exp_puc) = PAIRS_MI_PUC[&(*i, *j)];
+            let fpuc = bprange.accumulate_redundancies(*i, *j)?;
+            for (idx, rvlist) in SAMPLES_LIST.iter().enumerate() {
+                bprange.set_lmr_ds(Some(rvlist))?;
+                let pucij =
+                    bprange.accumulate_redundancies_for(*i, *j, rvlist)?;
+                let mij = bprange.get_mi(*i, *j)?;
+                let lmrij = bprange.compute_lm_puc(*i, *j)?;
+                let msij = (
+                    bprange.get_lmr_minsum(*i, *j)?,
+                    bprange.get_lmr_minsum(*j, *i)?,
+                );
+                let rsum = msij.0 + msij.1;
+                debug!(
+                    " -> IJ {:?} {:?} {} {:?}",
+                    (i, j, idx),
+                    (mij, exp_mi, fpuc, exp_puc),
+                    rsum,
+                    (pucij, lmrij, puc_vec[idx])
+                );
+                let mi_diff = (mij - exp_mi).abs() < 1e-3;
+                let puc_diff = (fpuc - exp_puc).abs() < 1e-3;
+                let acc_diff = (pucij - puc_vec[idx]).abs() < 1e-3;
+                let lmr_diff = (lmrij - puc_vec[idx]).abs() < 1e-3;
+                assert!(mi_diff);
+                assert!(puc_diff);
+                assert!(acc_diff);
+                assert!(lmr_diff);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    pub fn test_misi_range_pair_subset_lmr2() -> Result<(), GenericError> {
+        crate::tests::log_init();
+        let mut bprange =
+            MISIRangePair::<i32, f32>::new(&MISI_H5, (0..6, 0..46))?;
+        for ((i, j), puc_vec) in SAMPLES_PUC2.iter() {
+            let (exp_mi, exp_puc) = PAIRS_MI_PUC2[&(*i, *j)];
+            let fpuc = bprange.accumulate_redundancies(*i, *j)?;
+            for (idx, rvlist) in SAMPLES_LIST2.iter().enumerate() {
+                bprange.set_lmr_ds(Some(rvlist))?;
+                let pucij =
+                    bprange.accumulate_redundancies_for(*i, *j, rvlist)?;
+                let mij = bprange.get_mi(*i, *j)?;
+                let lmrij = bprange.compute_lm_puc(*i, *j)?;
+                let msij = (
+                    bprange.get_lmr_minsum(*i, *j)?,
+                    bprange.get_lmr_minsum(*j, *i)?,
+                );
+                let rsum = msij.0 + msij.1;
+                debug!(
+                    " --> IJ {:?} {:?} {} {:?}",
+                    (i, j, idx),
+                    (mij, exp_mi, fpuc, exp_puc),
+                    rsum,
+                    (pucij, lmrij, puc_vec[idx])
+                );
+                let puc_diff = (fpuc - exp_puc).abs() < 1e-3;
+                let mi_diff = (mij - exp_mi).abs() < 1e-3;
+                let acc_diff = (pucij - puc_vec[idx]).abs() < 1e-3;
+                let lmr_diff = (lmrij - puc_vec[idx]).abs() < 1e-3;
+                assert!(mi_diff);
+                assert!(puc_diff);
+                assert!(acc_diff);
+                assert!(lmr_diff);
+            }
+        }
+        Ok(())
+    }
 }

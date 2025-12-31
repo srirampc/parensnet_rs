@@ -33,6 +33,7 @@ pub enum Error {
     InvalidIndex(usize),
     InvalidAbout(usize),
     InvalidBy(usize),
+    Unexpected(&'static str),
 }
 
 impl std::fmt::Display for Error {
@@ -46,6 +47,9 @@ impl std::fmt::Display for Error {
             }
             Error::InvalidBy(rby) => {
                 write!(f, "Invalid By    : {rby}")
+            }
+            Error::Unexpected(str_err) => {
+                write!(f, "Unexpected    : {str_err}")
             }
         }
     }
