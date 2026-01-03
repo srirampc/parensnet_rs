@@ -1,4 +1,4 @@
-use hdf5_metno::{self as hdf5, H5Type};
+use hdf5::{H5Type};
 use mpi::collective::SystemOperation;
 use mpi::traits::{AsRaw, CommunicatorCollectives};
 use ndarray::{Array1, Array2};

@@ -1,5 +1,5 @@
 use crate::types::Pair;
-use hdf5_metno::{self as hdf5, H5Type};
+use hdf5::{H5Type};
 use ndarray::{Array1, Array2};
 use num::ToPrimitive;
 use std::ops::Range;

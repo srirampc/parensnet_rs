@@ -2,7 +2,7 @@ use crate::{
     types::{DiscretizerMethod, LogBase},
     util::GenericError,
 };
-use hdf5_metno::{self as hdf5};
+use hdf5;
 use log::LevelFilter;
 use serde::{Deserialize, Serialize};
 

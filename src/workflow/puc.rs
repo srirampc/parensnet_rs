@@ -7,7 +7,7 @@ use crate::{
     util::{GenericError, RangePair, vec::Vec2d},
 };
 
-use hdf5_metno::Error as H5Error;
+use hdf5::Error as H5Error;
 use itertools::iproduct;
 use ndarray::{Array1, Array2, ArrayView1};
 

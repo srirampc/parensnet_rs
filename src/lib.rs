@@ -9,7 +9,6 @@ pub mod workflow;
 #[cfg(test)]
 mod tests {
     use flate2::bufread::GzDecoder;
-    use hdf5_metno::{self as hdf5};
     use log::info;
     use ndarray::{Array1, Array2};
     use serde::de::DeserializeOwned;
