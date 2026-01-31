@@ -1,34 +1,19 @@
-use super::{IdVResults, WorkDistributor, WorkflowArgs, collect_samples};
+use super::{
+    IdVResults, WorkDistributor, WorkflowArgs, collect_samples, pair_indices,
+};
 use crate::{
     comm::CommIfx,
     cond_info,
     h5::mpio::{block_write1d, block_write2d, create_file},
     mvim::{misi::MISIRangePair, rv::Error as RVError, rv::MRVTrait},
-    util::{GenericError, RangePair, vec::Vec2d},
+    util::{RangePair, Vec2d},
 };
 
+use anyhow::Result;
 use hdf5::Error as H5Error;
-use itertools::iproduct;
 use ndarray::{Array1, Array2, ArrayView1};
 
 pub type PUCResults = IdVResults<i32, f32>;
-
-fn pair_indices(st_ranges: RangePair<usize>) -> Array2<i32> {
-    let (s_range, t_range) = st_ranges;
-    let (s_vec, t_vec): (Vec<i32>, Vec<i32>) = iproduct!(s_range, t_range)
-        .filter(|(src, tgt)| src < tgt)
-        .map(|(src, tgt)| (src as i32, tgt as i32))
-        .unzip();
-
-    let mut st_arr = Array2::<i32>::zeros((s_vec.len(), 2));
-    st_arr
-        .slice_mut(ndarray::s![.., 0])
-        .assign(&Array1::from_vec(s_vec));
-    st_arr
-        .slice_mut(ndarray::s![.., 1])
-        .assign(&Array1::from_vec(t_vec));
-    st_arr
-}
 
 fn save_puc(
     puc_results: PUCResults,
@@ -42,13 +27,13 @@ fn save_puc(
     Ok(())
 }
 
-pub struct SampledPUC<'a> {
+pub struct SampledPUCWorkflow<'a> {
     pub mpi_ifx: &'a CommIfx,
     pub wdistr: &'a WorkDistributor,
     pub args: &'a WorkflowArgs,
 }
 
-impl<'a> SampledPUC<'a> {
+impl<'a> SampledPUCWorkflow<'a> {
     fn run_with_samples(
         &self,
         st_row: ArrayView1<i32>,
@@ -74,7 +59,7 @@ impl<'a> SampledPUC<'a> {
         &self,
         st_ranges: &RangePair<usize>,
         r_samples: &Option<Vec2d<i32>>,
-    ) -> Result<PUCResults, GenericError> {
+    ) -> Result<PUCResults> {
         let m_range = MISIRangePair::<i32, f32>::new(
             &self.args.h5ad_file,
             st_ranges.clone(),
@@ -99,7 +84,7 @@ impl<'a> SampledPUC<'a> {
         &self,
         bid: usize,
         rsamples: &Option<Vec2d<i32>>,
-    ) -> Result<PUCResults, GenericError> {
+    ) -> Result<PUCResults> {
         self.run_st_ranges(
             self.wdistr
                 .pairs2d
@@ -109,7 +94,7 @@ impl<'a> SampledPUC<'a> {
         )
     }
 
-    pub fn run(&self) -> Result<(), GenericError> {
+    pub fn run(&self) -> Result<()> {
         let nbatches = self.wdistr.pairs2d.n_batches;
         // allow for samples being none
         let rsamples = match collect_samples::<i32>(
@@ -124,7 +109,7 @@ impl<'a> SampledPUC<'a> {
                 None
             }
         };
-        let bat_results: Result<Vec<_>, GenericError> = (0..nbatches)
+        let bat_results: Result<Vec<_>> = (0..nbatches)
             .map(|bidx| self.run_batch(bidx, &rsamples))
             .collect();
         match bat_results {
@@ -138,19 +123,19 @@ impl<'a> SampledPUC<'a> {
     }
 }
 
-pub struct LMRPUC<'a> {
+pub struct LMRPUCWorkflow<'a> {
     pub mpi_ifx: &'a CommIfx,
     pub wdistr: &'a WorkDistributor,
     pub args: &'a WorkflowArgs,
 }
 
-impl<'a> LMRPUC<'a> {
+impl<'a> LMRPUCWorkflow<'a> {
     fn run_with_misi_range(
         &self,
         m_range: &MISIRangePair<i32, f32>,
         r_pindex: &Array2<i32>,
         r_pucs: &mut Array1<f32>,
-    ) -> Result<(), GenericError> {
+    ) -> Result<()> {
         for (idx, st_row) in r_pindex.rows().into_iter().enumerate() {
             let (src, tgt) = (st_row[0], st_row[1]);
             r_pucs[idx] += m_range.compute_lm_puc(src, tgt)?;
@@ -162,7 +147,7 @@ impl<'a> LMRPUC<'a> {
         &self,
         st_ranges: &RangePair<usize>,
         r_samples: &Option<Vec2d<i32>>,
-    ) -> Result<PUCResults, GenericError> {
+    ) -> Result<PUCResults> {
         let r_pindex = pair_indices(st_ranges.clone());
         let mut r_pucs = Array1::from_vec(vec![0.0f32; r_pindex.len()]);
         let mut m_range = MISIRangePair::<i32, f32>::new(
@@ -194,7 +179,7 @@ impl<'a> LMRPUC<'a> {
         &self,
         bid: usize,
         rsamples: &Option<Vec2d<i32>>,
-    ) -> Result<PUCResults, GenericError> {
+    ) -> Result<PUCResults> {
         self.run_st_ranges(
             self.wdistr
                 .pairs2d
@@ -204,7 +189,7 @@ impl<'a> LMRPUC<'a> {
         )
     }
 
-    pub fn run(&self) -> Result<(), GenericError> {
+    pub fn run(&self) -> Result<()> {
         let nbatches = self.wdistr.pairs2d.n_batches;
         let rsamples = match collect_samples::<i32>(
             self.mpi_ifx,
@@ -219,7 +204,7 @@ impl<'a> LMRPUC<'a> {
             }
         };
 
-        let bat_results: Result<Vec<PUCResults>, GenericError> = (0..nbatches)
+        let bat_results: Result<Vec<PUCResults>> = (0..nbatches)
             .map(|bidx| self.run_batch(bidx, &rsamples))
             .collect();
 

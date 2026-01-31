@@ -1,10 +1,12 @@
-#![allow(dead_code)]
+use anyhow::Result;
 use clap::Parser;
-use parensnet_rs::comm;
-use parensnet_rs::util::GenericError;
-use parensnet_rs::workflow::{self};
-use parensnet_rs::{cond_error, cond_info};
-use std::fmt;
+use parensnet_rs::{
+    anndata::AnnData,
+    comm::CommIfx,
+    cond_error, cond_info,
+    pucn::{WorkflowArgs, execute_workflow},
+};
+use thiserror::Error;
 
 /// Parensnet:: Parallel Ensembl Gene Network Construction
 #[derive(Parser, Debug)]
@@ -16,34 +18,24 @@ struct CLIArgs {
 
 struct CLIInit {
     args: CLIArgs,
-    mpi_ifx: comm::CommIfx,
+    mpi_ifx: CommIfx,
 }
 
-impl fmt::Display for CLIArgs {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "(config: {})", self.config.to_str().unwrap())
+impl std::fmt::Display for CLIArgs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "(config: {:?})", self.config.to_str())
     }
 }
 
-#[derive(Debug)]
+#[derive(Error, Debug)]
 enum Error {
+    #[error("Failed to read {0}")]
     InputReadError(String),
 }
-impl fmt::Display for Error {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::InputReadError(in_file) => {
-                write!(f, "Failed to write {}", in_file)
-            }
-        }
-    }
-}
 
-impl std::error::Error for Error {}
-
-fn cli_init() -> Result<CLIInit, GenericError> {
+fn cli_init() -> Result<CLIInit> {
     env_logger::try_init()?;
-    let mpi_ifx = comm::CommIfx::init();
+    let mpi_ifx = CommIfx::init();
     // Parse command line arguments
     match CLIArgs::try_parse() {
         Ok(args) => Ok(CLIInit { args, mpi_ifx }),
@@ -51,12 +43,12 @@ fn cli_init() -> Result<CLIInit, GenericError> {
             if mpi_ifx.rank == 0 {
                 let _ = err.print();
             };
-            Err(GenericError::from(err))
+            Err(anyhow::Error::from(err))
         }
     }
 }
 
-fn run(clid: CLIInit) -> Result<(), GenericError> {
+fn run(clid: CLIInit) -> Result<()> {
     let mcx = &clid.mpi_ifx;
     cond_info!(mcx.is_root(); "Command Line Arguments : {}", clid.args);
     // Read input fail
@@ -76,34 +68,39 @@ fn run(clid: CLIInit) -> Result<(), GenericError> {
             format!("Failed to read input: {}", clid.args.config.display());
         cond_error!(mcx.is_root(); "{}", errv);
         let err = Error::InputReadError(String::from("hello"));
-        return Err(GenericError::from(err));
+        return Err(anyhow::Error::from(err));
     }
     // Load Arguments
-    let wargs = match serde_saphyr::from_str::<workflow::WorkflowArgs>(&rstr?) {
-        Ok(mut wargs) => {
-            cond_info!(mcx.is_root(); "Parsed successfully: {:?}", wargs);
-            cond_info!(mcx.is_root(); "Data H5AD : {}", wargs.h5ad_file);
-            wargs.update()?;
-            wargs
-        }
-        Err(err) => {
-            cond_error!(mcx.is_root(); "Failed to parse YAML: {}", err);
-            return Err(GenericError::from(err));
-        }
-    };
+    let (wargs, adata) =
+        match serde_saphyr::from_str::<WorkflowArgs>(&rstr?) {
+            Ok(mut wargs) => {
+                cond_info!(mcx.is_root(); "Parsed successfully: {:?}", wargs);
+                cond_info!(mcx.is_root(); "Data H5AD : {}", wargs.h5ad_file);
+                let adata = AnnData::new(
+                    &wargs.h5ad_file,
+                    Some("_index".to_string()),
+                )?;
+                wargs.update_dims(&[adata.nobs, adata.nvars]);
+                (wargs, adata)
+            }
+            Err(err) => {
+                cond_error!(mcx.is_root(); "Failed to parse YAML: {}", err);
+                return Err(anyhow::Error::from(err));
+            }
+        };
 
-    workflow::execute_workflow(mcx, &wargs)?;
+    execute_workflow(mcx, &wargs, &adata)?;
     Ok(())
 }
 
-fn main() -> Result<(), GenericError> {
+fn main() -> Result<()> {
     match cli_init() {
         Ok(clid) => run(clid),
         Err(err) => {
             if let Some(clerr) = err.downcast_ref::<clap::Error>() {
                 std::process::exit(clerr.exit_code())
             }
-            Err(GenericError::from(err))
+            Err(err)
         }
     }
 }

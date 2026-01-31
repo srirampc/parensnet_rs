@@ -1,3 +1,6 @@
 [submodule "ext/hdf5-rust"]
 	path = ext/hdf5-rust
 	url = https://github.com/srirampc/hdf5-rust.git
+[submodule "ext/sope"]
+	path = ext/sope
+	url = https://github.com/srirampc/sope.git

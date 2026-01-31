@@ -1,37 +1,30 @@
 #![allow(dead_code)]
 mod args;
-pub mod puc;
-pub use self::args::RunMode;
-pub use self::args::WorkflowArgs;
+mod misiw;
+mod puc;
+pub use self::args::{RunMode, WorkflowArgs};
 
 use crate::{
+    anndata::AnnData,
     comm::CommIfx,
     util::{
-        BatchBlocks2D, GenericError, all_block_ranges, exc_prefix_sum, vec::Vec2d,
+        BatchBlocks2D, RangePair, all_block_ranges, exc_prefix_sum, Vec2d,
     },
 };
+use anyhow::{Result, bail};
+use itertools::iproduct;
 use mpi::traits::{Communicator, Root};
 use ndarray::{Array1, Array2, Axis};
 use ndarray_rand::{RandomExt, SamplingStrategy};
 use num::{FromPrimitive, Integer, Zero};
 use std::ops::Range;
+use thiserror::Error;
 
-#[derive(Debug)]
-pub enum Error {
+#[derive(Error, Debug)]
+pub enum WorkflowError {
+    #[error("Error reading file (nvars:{0}, nrounds:{1}, nsamples:{2})")]
     InvalidSamples(usize, usize, usize),
 }
-
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Error::InvalidSamples(nvars, nrounds, nsamples) => {
-                write!(f, "Error reading file ({nvars}, {nrounds}, {nsamples})")
-            }
-        }
-    }
-}
-
-impl std::error::Error for Error {}
 
 pub struct WorkDistributor {
     rank: i32,
@@ -84,6 +77,23 @@ impl<T: Clone + Zero, S: Clone + Zero> IdVResults<T, S> {
     }
 }
 
+fn pair_indices(st_ranges: RangePair<usize>) -> Array2<i32> {
+    let (s_range, t_range) = st_ranges;
+    let (s_vec, t_vec): (Vec<i32>, Vec<i32>) = iproduct!(s_range, t_range)
+        .filter(|(src, tgt)| src < tgt)
+        .map(|(src, tgt)| (src as i32, tgt as i32))
+        .unzip();
+
+    let mut st_arr = Array2::<i32>::zeros((s_vec.len(), 2));
+    st_arr
+        .slice_mut(ndarray::s![.., 0])
+        .assign(&Array1::from_vec(s_vec));
+    st_arr
+        .slice_mut(ndarray::s![.., 1])
+        .assign(&Array1::from_vec(t_vec));
+    st_arr
+}
+
 pub fn generate_samples(
     nvars: usize,
     nrounds: usize,
@@ -128,16 +138,16 @@ pub fn collect_samples<T: Integer + Clone + FromPrimitive>(
     nvars: usize,
     nrounds: usize,
     nsamples: usize,
-) -> Result<Vec2d<T>, Error> {
+) -> Result<Vec2d<T>> {
     if nrounds == 0 || nsamples == 0 {
-        return Result::Err(Error::InvalidSamples(nvars, nrounds, nsamples));
+        bail!(WorkflowError::InvalidSamples(nvars, nrounds, nsamples,));
     }
     let mut sample_arr = if mcx.is_root() {
         generate_samples(nvars, nrounds, nsamples)
     } else {
         vec![0usize; nrounds * nsamples]
     };
-    let rootp = mcx.comm.process_at_rank(0);
+    let rootp = mcx.comm().process_at_rank(0);
     rootp.broadcast_into(&mut sample_arr);
     let tsamples = sample_arr
         .iter()
@@ -149,7 +159,8 @@ pub fn collect_samples<T: Integer + Clone + FromPrimitive>(
 pub fn execute_workflow(
     mpi_ifx: &CommIfx,
     args: &WorkflowArgs,
-) -> Result<(), GenericError> {
+    adata: &AnnData,
+) -> Result<()> {
     // Compute Distributions
     let wdistr =
         WorkDistributor::new(args.nvars, args.npairs, mpi_ifx.rank, mpi_ifx.size);
@@ -157,7 +168,7 @@ pub fn execute_workflow(
     for rmode in &args.mode {
         match rmode {
             RunMode::SamplesRanges => {
-                let spuc = puc::SampledPUC {
+                let spuc = puc::SampledPUCWorkflow {
                     args,
                     wdistr: &wdistr,
                     mpi_ifx,
@@ -165,12 +176,21 @@ pub fn execute_workflow(
                 spuc.run()?;
             }
             RunMode::PUCLMR => {
-                let lpuc = puc::LMRPUC {
+                let lpuc = puc::LMRPUCWorkflow {
                     args,
                     wdistr: &wdistr,
                     mpi_ifx,
                 };
                 lpuc.run()?;
+            }
+            RunMode::MISI => {
+                let rmisi = misiw::MISIWorkFlow{
+                    args,
+                    adata, 
+                    wdistr: &wdistr,
+                    mpi_ifx, 
+                };
+                rmisi.run()?;
             }
             _ => todo!("Mode {:?} Not Completed Yet", rmode),
         }
@@ -195,7 +215,7 @@ mod tests {
     }
 
     #[test]
-    pub fn test_parse_workflow_args() -> Result<(), GenericError> {
+    pub fn test_parse_workflow_args() -> Result<()> {
         crate::tests::log_init();
         match parse_wflow_cfg!("pbmc20k_500_lpuc.yml") {
             Ok(wargs) => {
@@ -220,7 +240,7 @@ mod tests {
         Ok(())
     }
 
-    pub fn test_parse_workflow_distr() -> Result<(), GenericError> {
+    pub fn test_parse_workflow_distr() -> Result<()> {
         let wargs = parse_wflow_cfg!("pbmc20k_500_S6x4p.yml").unwrap();
         let wdistr = WorkDistributor::new(wargs.nvars, wargs.npairs, 2, 16);
         info!("Work Distribution : {:?}", wdistr.pairs2d);

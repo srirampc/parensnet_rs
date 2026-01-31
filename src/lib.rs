@@ -4,21 +4,21 @@ pub mod hist;
 pub mod mvim;
 pub mod types;
 pub mod util;
-pub mod workflow;
+pub mod pucn;
+pub mod anndata;
+pub mod gbn;
 
 #[cfg(test)]
 mod tests {
+    use anyhow::Result;
     use flate2::bufread::GzDecoder;
     use log::info;
     use ndarray::{Array1, Array2};
-    use serde::de::DeserializeOwned;
-    use serde::{Deserialize, Serialize};
-    use std::collections::HashMap;
-    use std::fmt::Debug;
-    use std::io::Read;
-    use std::ops::Range;
-
-    use crate::util::GenericError;
+    use serde::{
+        de::DeserializeOwned,
+        {Deserialize, Serialize},
+    };
+    use std::{collections::HashMap, fmt::Debug, io::Read, ops::Range};
 
     #[macro_export]
     macro_rules! test_config_file_path {
@@ -128,7 +128,7 @@ mod tests {
         }
     }
 
-    pub fn parse_gz_test_data<T>(data_file: &str) -> Result<T, GenericError>
+    pub fn parse_gz_test_data<T>(data_file: &str) -> Result<T>
     where
         T: Debug + Serialize + DeserializeOwned,
     {
@@ -136,34 +136,33 @@ mod tests {
         let bin_data = std::fs::read(data_file)?;
         let mut contents = String::new();
         GzDecoder::new(bin_data.as_slice()).read_to_string(&mut contents)?;
-
         match serde_json::from_str::<T>(&contents) {
             Ok(puc_data) => Ok(puc_data),
-            Err(err) => Err(GenericError::from(err)),
+            Err(err) => Err(anyhow::Error::from(err)),
         }
     }
 
     #[allow(dead_code)]
-    pub fn puc_test_data() -> Result<PUCTestData, GenericError> {
+    pub fn puc_test_data() -> Result<PUCTestData> {
         parse_gz_test_data(test_data_file_path!("puc_data_small.json.gz"))
     }
 
     #[allow(dead_code)]
-    pub fn puc_test4_data() -> Result<PUCTestData, GenericError> {
+    pub fn puc_test4_data() -> Result<PUCTestData> {
         parse_gz_test_data(test_data_file_path!("puc_data4_small.json.gz"))
     }
 
     #[allow(dead_code)]
-    pub fn puc_test4_data_w_lmr() -> Result<PUCTestData, GenericError> {
+    pub fn puc_test4_data_w_lmr() -> Result<PUCTestData> {
         parse_gz_test_data(test_data_file_path!("puc_data4_w_lmr_small.json.gz"))
     }
     #[allow(dead_code)]
-    pub fn hist_test_data() -> Result<HistTestData, GenericError> {
+    pub fn hist_test_data() -> Result<HistTestData> {
         parse_gz_test_data(test_data_file_path!("bbh_test.json.gz"))
     }
 
     #[allow(dead_code)]
-    pub fn hist_large_test_data() -> Result<HistTestData, GenericError> {
+    pub fn hist_large_test_data() -> Result<HistTestData> {
         parse_gz_test_data(test_data_file_path!("bbh_large_test.json.gz"))
     }
 

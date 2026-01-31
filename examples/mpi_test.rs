@@ -1,14 +1,16 @@
+use anyhow::Result;
 use clap::Parser;
 use mpi::traits::{Communicator, CommunicatorCollectives, Root};
-use parensnet_rs::comm::CommIfx;
-use parensnet_rs::h5::mpio::{
-    block_read1d, block_read2d, block_write1d, block_write2d, create_file,
-    create_write2d,
+use parensnet_rs::{
+    comm::CommIfx,
+    h5::mpio::{
+        block_read1d, block_read2d, block_write1d, block_write2d, create_file,
+        create_write2d,
+    },
+    util::Vec2d,
+    pucn::{collect_samples, generate_samples},
+    {cond_error, cond_info, cond_println},
 };
-use parensnet_rs::util::GenericError;
-use parensnet_rs::util::vec::Vec2d;
-use parensnet_rs::workflow::{collect_samples, generate_samples};
-use parensnet_rs::{cond_error, cond_info, cond_println};
 use serde::{Deserialize, Serialize};
 
 /// Parensnet:: Parallel Ensembl Gene Network Construction
@@ -58,7 +60,7 @@ fn test_index(comm_ifx: &CommIfx, wargs: &InArgs) {
     create_write2d(comm_ifx, &wargs.hdf_out, "data", "index", &rdata).unwrap();
 }
 
-fn parse_args(mcx: &CommIfx, args: &CLIArgs) -> Result<InArgs, GenericError> {
+fn parse_args(mcx: &CommIfx, args: &CLIArgs) -> Result<InArgs> {
     match serde_saphyr::from_str::<InArgs>(&std::fs::read_to_string(
         &args.config,
     )?) {
@@ -68,15 +70,15 @@ fn parse_args(mcx: &CommIfx, args: &CLIArgs) -> Result<InArgs, GenericError> {
         }
         Err(err) => {
             cond_error!(mcx.is_root(); "Failed to parse YAML: {}", err);
-            Err(GenericError::from(err))
+            Err(anyhow::Error::from(err))
         }
     }
 }
 
-fn test_h5(mcx: &CommIfx, args: &CLIArgs) -> Result<(), GenericError> {
+fn test_h5(mcx: &CommIfx, args: &CLIArgs) -> Result<()> {
     let wargs = parse_args(mcx, args)?;
     test_index(mcx, &wargs);
-    mcx.comm.barrier();
+    mcx.comm().barrier();
     test_puc(mcx, &wargs);
     Ok(())
 }
@@ -84,19 +86,19 @@ fn test_h5(mcx: &CommIfx, args: &CLIArgs) -> Result<(), GenericError> {
 fn test_samples(
     mcx: &CommIfx,
     args: &CLIArgs,
-) -> Result<Vec2d<usize>, GenericError> {
+) -> Result<Vec2d<usize>> {
     let wargs = parse_args(mcx, args)?;
     let mut sample_arr = if mcx.is_root() {
         generate_samples(wargs.nvars, wargs.nrounds, wargs.nsamples)
     } else {
         vec![0usize; wargs.nrounds * wargs.nsamples]
     };
-    let rootp = mcx.comm.process_at_rank(0);
+    let rootp = mcx.comm().process_at_rank(0);
     rootp.broadcast_into(&mut sample_arr);
     Ok(Vec2d::new(sample_arr, wargs.nsamples, wargs.nrounds))
 }
 
-fn run(mcx: &CommIfx, args: CLIArgs) -> Result<(), GenericError> {
+fn run(mcx: &CommIfx, args: CLIArgs) -> Result<()> {
     let wargs = parse_args(mcx, &args)?;
     let rtest = test_samples(mcx, &args)?;
     cond_println!(mcx.is_root();"RCTS: {:?}", rtest);

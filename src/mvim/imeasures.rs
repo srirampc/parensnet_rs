@@ -261,6 +261,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    use anyhow::Result;
     use itertools::Itertools;
     use lazy_static::lazy_static;
     use log::debug;
@@ -268,14 +269,14 @@ mod tests {
 
     use super::{mi_from_data_with_bb, redundancy, si_from_tab};
     use crate::{
-        hist::{around, bb_joint_histogram},
+        hist::bb_joint_histogram,
         mvim::imeasures::lmr_from_histogram,
         tests::{
             PUCTestData, puc_test4_data, puc_test4_data_w_lmr,
             test_exp_sub_matrix,
         },
         types::LogBase,
-        util::GenericError,
+        util::around,
     };
 
     lazy_static! {
@@ -334,7 +335,7 @@ mod tests {
     }
 
     #[test]
-    pub fn test_mi() -> Result<(), GenericError> {
+    pub fn test_mi() -> Result<()> {
         crate::tests::log_init();
         for (nobs, nvars) in [(1000, 3), (10000, 3)] {
             let px_data = &PUC_DATA.data[&nobs.to_string()];
@@ -358,7 +359,7 @@ mod tests {
     }
 
     #[test]
-    pub fn test_si() -> Result<(), GenericError> {
+    pub fn test_si() -> Result<()> {
         crate::tests::log_init();
         for (nobs, nvars) in [(1000, 3), (10000, 3)] {
             let px_data = &PUC_DATA.data[&nobs.to_string()];
@@ -398,7 +399,7 @@ mod tests {
     }
 
     #[test]
-    pub fn test_redundancy() -> Result<(), GenericError> {
+    pub fn test_redundancy() -> Result<()> {
         crate::tests::log_init();
         for (nobs, nvars) in [(1000, 3), (10000, 3)] {
             let px_data = &PUC_DATA.data[&nobs.to_string()];
@@ -448,7 +449,7 @@ mod tests {
     }
 
     #[test]
-    pub fn test_lmr() -> Result<(), GenericError> {
+    pub fn test_lmr() -> Result<()> {
         crate::tests::log_init();
         //tests for lmr
         for (nobs, nvars) in [(1000, 3), (10000, 3)] {

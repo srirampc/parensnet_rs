@@ -2,9 +2,11 @@
 use hdf5::{self, H5Type};
 use ndarray::Array1;
 use num::ToPrimitive;
-use std::collections::{HashMap, HashSet};
-use std::ops::Range;
-use std::rc::Rc;
+use std::{
+    collections::{HashMap, HashSet},
+    ops::Range,
+    rc::Rc,
+};
 
 use crate::h5::io::{
     read_scalar_attr, read1d_pair_of_points, read1d_pair_of_slices, read1d_point,
@@ -639,6 +641,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    use anyhow::Result;
     use lazy_static::lazy_static;
     use log::debug;
     use std::collections::HashMap;
@@ -646,7 +649,6 @@ mod tests {
     use super::{LMRDSPair, MISIPair, MISIRangePair};
     use crate::mvim::rv::{Error, MRVTrait};
     use crate::test_data_file_path;
-    use crate::util::GenericError;
 
     lazy_static! {
         static ref MISI_H5: &'static str =
@@ -714,7 +716,7 @@ mod tests {
     }
 
     #[test]
-    pub fn test_misi_pair_full() -> Result<(), GenericError> {
+    pub fn test_misi_pair_full() -> Result<()> {
         crate::tests::log_init();
         for ((pi, pj), (rmi, rpuc)) in PAIRS_MI_PUC.iter() {
             let (i, j) = (*pi, *pj);
@@ -738,7 +740,7 @@ mod tests {
     }
 
     #[test]
-    pub fn test_misi_range_pair_full() -> Result<(), GenericError> {
+    pub fn test_misi_range_pair_full() -> Result<()> {
         crate::tests::log_init();
         let bprange = MISIRangePair::<i32, f32>::new(&MISI_H5, (0..6, 0..6))?;
         for ((pi, pj), (rmi, rpuc)) in PAIRS_MI_PUC.iter() {
@@ -761,7 +763,7 @@ mod tests {
     }
 
     #[test]
-    pub fn test_misi_pair_subset_minsum() -> Result<(), GenericError> {
+    pub fn test_misi_pair_subset_minsum() -> Result<()> {
         crate::tests::log_init();
         let (exp_fnm, exp_snm) = (5.9917197, 5.8857145);
         let (i, j) = PAIRS_LIST[0];
@@ -780,7 +782,7 @@ mod tests {
             assert!(flmr_diff);
             assert!(slmr_diff);
         } else {
-            return Err(GenericError::from(Error::Unexpected(
+            return Err(anyhow::Error::from(Error::Unexpected(
                 "LMRDSPair not initialized",
             )));
         }
@@ -810,7 +812,7 @@ mod tests {
     }
 
     #[test]
-    pub fn test_misi_pair_subset_lmr1() -> Result<(), GenericError> {
+    pub fn test_misi_pair_subset_lmr1() -> Result<()> {
         crate::tests::log_init();
         for ((i, j), puc_vec) in SAMPLES_PUC.iter() {
             let mut bpair =
@@ -848,7 +850,7 @@ mod tests {
     }
 
     #[test]
-    pub fn test_misi_pair_subset_lmr2() -> Result<(), GenericError> {
+    pub fn test_misi_pair_subset_lmr2() -> Result<()> {
         crate::tests::log_init();
         for ((i, j), puc_vec) in SAMPLES_PUC2.iter() {
             let (exp_mi, exp_puc) = PAIRS_MI_PUC2[&(*i, *j)];
@@ -886,7 +888,7 @@ mod tests {
     }
 
     #[test]
-    pub fn test_misi_range_pair_subset_lmr1() -> Result<(), GenericError> {
+    pub fn test_misi_range_pair_subset_lmr1() -> Result<()> {
         crate::tests::log_init();
         let mut bprange = MISIRangePair::<i32, f32>::new(&MISI_H5, (0..6, 0..6))?;
         for ((i, j), puc_vec) in SAMPLES_PUC.iter() {
@@ -924,7 +926,7 @@ mod tests {
     }
 
     #[test]
-    pub fn test_misi_range_pair_subset_lmr2() -> Result<(), GenericError> {
+    pub fn test_misi_range_pair_subset_lmr2() -> Result<()> {
         crate::tests::log_init();
         let mut bprange =
             MISIRangePair::<i32, f32>::new(&MISI_H5, (0..6, 0..46))?;

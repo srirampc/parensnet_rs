@@ -1,10 +1,8 @@
-use crate::{
-    types::{DiscretizerMethod, LogBase},
-    util::GenericError,
-};
-use hdf5;
+use hdf5::{self, Error as H5Error};
 use log::LevelFilter;
 use serde::{Deserialize, Serialize};
+
+use crate::types::{DiscretizerMethod, LogBase};
 
 fn default_gene_id_col() -> String {
     "gene_ids".to_string()
@@ -20,6 +18,16 @@ fn default_nrounds() -> usize {
 
 fn default_nsamples() -> usize {
     200
+}
+
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum InputError {
+    #[error(transparent)]
+    H5(#[from] H5Error),
+    #[error("File {0} is missing")]
+    MissingFileError(String),
 }
 
 // 'NOTSET', 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'
@@ -123,16 +131,13 @@ pub struct WorkflowArgs {
     #[serde(default)]
     pub log_level: LogLevel, // = 'DEBUG'
 
-    #[serde(skip)]
-    h5_fptr: Option<hdf5::File>,
+    //#[serde(skip)]
+    //h5_fptr: Option<hdf5::File>,
+
 }
 
 impl WorkflowArgs {
-    pub fn update(&mut self) -> Result<(), GenericError> {
-        let file = hdf5::File::open(&self.h5ad_file)?;
-        let ds = file.dataset("X")?;
-        let dims = ds.shape();
-        assert_eq!(dims.len(), 2);
+    pub fn update_dims(&mut self, dims: &[usize]) {
         if self.nobs == 0 {
             self.nobs = dims[0];
         }
@@ -142,15 +147,14 @@ impl WorkflowArgs {
         if self.npairs == 0 {
             self.npairs = (self.nvars * (self.nvars - 1)) / 2;
         }
-        self.h5_fptr = Some(file);
-        Ok(())
     }
+
 }
 
-impl Drop for WorkflowArgs {
-    fn drop(&mut self) {
-        if let Some(h5_fptr) = self.h5_fptr.take() {
-            let _ = h5_fptr.close();
-        }
-    }
-}
+//impl Drop for WorkflowArgs {
+//    fn drop(&mut self) {
+//        if let Some(h5_fptr) = self.h5_fptr.take() {
+//            let _ = h5_fptr.close();
+//        }
+//    }
+//}

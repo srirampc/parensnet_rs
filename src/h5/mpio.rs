@@ -14,7 +14,7 @@ pub fn block_read1d<T: H5Type>(
 ) -> Result<Array1<T>, hdf5::Error> {
     let file = hdf5::File::with_options()
         .with_fapl(|fapl| {
-            fapl.mpio(mcx.comm.as_raw(), None)
+            fapl.mpio(mcx.comm().as_raw(), None)
                 .all_coll_metadata_ops(true)
                 .coll_metadata_write(true)
         })
@@ -37,7 +37,7 @@ pub fn block_read2d<T: H5Type>(
     //
     let file = hdf5::File::with_options()
         .with_fapl(|fapl| {
-            fapl.mpio(mcx.comm.as_raw(), None)
+            fapl.mpio(mcx.comm().as_raw(), None)
                 .all_coll_metadata_ops(true)
                 .coll_metadata_write(true)
         })
@@ -59,7 +59,7 @@ pub fn block_write1d<T: H5Type>(
     data: &ndarray::Array1<T>,
 ) -> Result<(), hdf5::Error> {
     let mut n_data: usize = 0;
-    mcx.comm
+    mcx.comm()
         .all_reduce_into(&(data.len()), &mut n_data, SystemOperation::sum());
     let s_range = block_range(mcx.rank, mcx.size, n_data);
     h_group
@@ -79,7 +79,7 @@ pub fn block_write2d<T: H5Type>(
     data: &ndarray::Array2<T>,
 ) -> Result<(), hdf5::Error> {
     let mut n_rows: usize = 0;
-    mcx.comm.all_reduce_into(
+    mcx.comm().all_reduce_into(
         &(data.nrows()),
         &mut n_rows,
         SystemOperation::sum(),
@@ -102,7 +102,7 @@ pub fn create_file(
 ) -> Result<hdf5::File, hdf5::Error> {
     hdf5::File::with_options()
         .with_fapl(|fapl| {
-            fapl.mpio(fx_comm.comm.as_raw(), None)
+            fapl.mpio(fx_comm.comm().as_raw(), None)
                 .all_coll_metadata_ops(true)
                 .coll_metadata_write(true)
         })
@@ -119,5 +119,18 @@ pub fn create_write2d<T: H5Type>(
     let h_file = create_file(fx_comm, fname)?;
     let h_group = h_file.create_group(group)?;
     block_write2d(fx_comm, &h_group, dsname, data)?;
+    Ok(())
+}
+
+pub fn create_write1d<T: H5Type>(
+    fx_comm: &CommIfx,
+    fname: &str,
+    group: &str,
+    dsname: &str,
+    data: &ndarray::Array1<T>,
+) -> Result<(), hdf5::Error> {
+    let h_file = create_file(fx_comm, fname)?;
+    let h_group = h_file.create_group(group)?;
+    block_write1d(fx_comm, &h_group, dsname, data)?;
     Ok(())
 }
