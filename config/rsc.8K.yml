@@ -1,0 +1,9 @@
+h5ad_file: "/localscratch/schockalingam6/tmp/rsc.8k/adata_lei.100k.8k.h5ad"
+tf_csv_file: "data/pbmc/trrust_tf.txt"
+nroundup: 3
+output_file: /localscratch/schockalingam6/tmp/rsc.8k/rsc.8k.h5
+mode: gb_grn
+gbm_params:
+  verbose: 0
+  num_threads: 2
+n_sample_genes: 200

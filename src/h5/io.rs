@@ -1,5 +1,5 @@
 use crate::types::Pair;
-use hdf5::{H5Type};
+use hdf5::H5Type;
 use ndarray::{Array1, Array2};
 use num::ToPrimitive;
 use std::ops::Range;
@@ -75,4 +75,19 @@ pub fn read1d_pair_of_points<T: Clone + H5Type, S: ToPrimitive>(
         read1d_point(group, name, st_indices.0)?,
         read1d_point(group, name, st_indices.1)?,
     ))
+}
+
+pub fn write_1d<T: H5Type, S: ToPrimitive>(
+    h_group: &hdf5::Group,
+    dsname: &str,
+    data: &ndarray::Array1<T>,
+) -> Result<(), hdf5::Error> {
+    let n_data = data.len();
+    h_group
+        .new_dataset_builder()
+        .empty::<T>()
+        .shape(hdf5::Extents::from(n_data))
+        .create(dsname)?
+        .as_writer()
+        .write(data)
 }

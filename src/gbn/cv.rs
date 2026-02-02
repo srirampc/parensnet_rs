@@ -95,7 +95,7 @@ pub fn cross_validate_target(
             (train_idx, val_idx),
             gb_params.clone(),
         )?;
-        best_iterations.push(result.best_iteration as usize);
+        best_iterations.push(result.num_iterations() as usize);
     }
 
     Ok(best_iterations)
@@ -104,7 +104,7 @@ pub fn cross_validate_target(
 pub struct OptimalGBM {
     pub all_rounds: Vec2d<usize>,
     pub sorted_rounds: Vec<usize>,
-    pub mean: usize,
+    pub mean: f64,
     pub variance: f64,
     pub median: usize,
 }
@@ -113,16 +113,46 @@ impl Display for OptimalGBM {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "[Mean: {} ; Median: {}; Variance: {:.2}; Std. dev: {:.2}]",
+            "[Mean: {} ; Median: {}; Variance: {:.2}; Std. dev: {:.2}; Range: {} - {}]",
             self.mean,
             self.median,
             self.variance,
             self.variance.sqrt(),
+            self.sorted_rounds[0],
+            self.sorted_rounds[self.sorted_rounds.len() - 1]
         )
     }
 }
 
 impl OptimalGBM {
+    pub fn new(
+        all_rounds: Vec<usize>,
+        n_sample_genes: usize,
+        n_folds: usize,
+    ) -> Self {
+        // Calculate statistics
+        let mean_rounds: f64 =
+            all_rounds.iter().cloned().map(|r| r as f64).sum::<f64>()
+                / all_rounds.len() as f64;
+
+        let variance = all_rounds
+            .iter()
+            .map(|&r| (r as f64 - mean_rounds).powi(2))
+            .sum::<f64>()
+            / all_rounds.len() as f64;
+
+        let mut sorted_rounds = all_rounds.clone();
+        sorted_rounds.sort_unstable();
+        let median_rounds = sorted_rounds[sorted_rounds.len() / 2];
+
+        Self {
+            all_rounds: Vec2d::new(all_rounds, n_sample_genes, n_folds),
+            sorted_rounds,
+            mean: mean_rounds,
+            variance,
+            median: median_rounds,
+        }
+    }
     pub fn print(&self) {
         println!("\n=== Cross-Validation Results ===");
         println!("Mean optimal rounds: {}", self.mean);
@@ -171,27 +201,11 @@ pub fn optimal_gbm_iterations(
         .iter()
         .flat_map(|gene_rounds| gene_rounds.iter().copied())
         .collect();
-
-    // Calculate statistics
-    let mean_rounds = all_rounds.iter().sum::<usize>() / all_rounds.len();
-
-    let variance = all_rounds
-        .iter()
-        .map(|&r| (r as f64 - mean_rounds as f64).powi(2))
-        .sum::<f64>()
-        / all_rounds.len() as f64;
-
-    let mut sorted_rounds = all_rounds.clone();
-    sorted_rounds.sort_unstable();
-    let median_rounds = sorted_rounds[sorted_rounds.len() / 2];
-
-    Ok(OptimalGBM {
-        all_rounds: Vec2d::new(all_rounds, config.n_sample_genes, config.n_folds),
-        sorted_rounds,
-        mean: median_rounds,
-        variance,
-        median: median_rounds,
-    })
+    Ok(OptimalGBM::new(
+        all_rounds,
+        config.n_sample_genes,
+        config.n_folds,
+    ))
 }
 
 struct DistCVConfig<'a> {
@@ -360,7 +374,7 @@ fn dist_cross_validate(
                 gb_params.clone(),
             )?
         };
-        best_iterations.push(cv_iters.best_iteration as usize);
+        best_iterations.push(cv_iters.num_iterations() as usize);
     }
     Ok(best_iterations)
 }
@@ -415,31 +429,16 @@ pub fn mpi_optimal_gbm_iterations(
         sope::cond_info!(mpi_ifx.is_root(); "START STATISTICS");
     }
 
-    sope::cond_debug!(mpi_ifx.is_root(); "ALL ROUNDS : {} {:?}", all_rounds.len(), all_rounds);
-
-    // Calculate statistics
-    let mean_rounds = all_rounds.iter().sum::<usize>() / all_rounds.len();
-
-    let variance = all_rounds
-        .iter()
-        .map(|&r| (r as f64 - mean_rounds as f64).powi(2))
-        .sum::<f64>()
-        / all_rounds.len() as f64;
-
-    let mut sorted_rounds = all_rounds.clone();
-    sorted_rounds.sort_unstable();
-    let median_rounds = sorted_rounds[sorted_rounds.len() / 2];
+    sope::cond_debug!(
+        mpi_ifx.is_root(); "ALL ROUNDS : {} {:?}", all_rounds.len(), all_rounds
+    );
+    let opt_gbm =
+        OptimalGBM::new(all_rounds, config.n_sample_genes, config.n_folds);
 
     if log::log_enabled!(log::Level::Info) {
         mpi_ifx.comm().barrier();
         sope::cond_info!(mpi_ifx.is_root(); "COMPLETE STATISTICS");
     }
 
-    Ok(OptimalGBM {
-        all_rounds: Vec2d::new(all_rounds, config.n_sample_genes, config.n_folds),
-        sorted_rounds,
-        mean: median_rounds,
-        variance,
-        median: median_rounds,
-    })
+    Ok(opt_gbm)
 }

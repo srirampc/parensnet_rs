@@ -3,3 +3,4 @@ tmp
 Cargo.lock
 data/test_write.h5
 data/test_write2.h5
+ext/lightgbm3-rs

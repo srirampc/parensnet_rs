@@ -1,29 +1,21 @@
 #![allow(dead_code)]
 use anyhow::Result;
 use clap::Parser;
-use mpi::traits::CommunicatorCollectives;
+use sope::reduction::any_of;
 use thiserror::Error;
 
 use parensnet_rs::{
-    anndata::{AnnData, GeneSetAD},
     comm::CommIfx,
-    cond_info,
-    gbn::{
-        CVConfig, GBMParams, mpi_gradient_boosting_grn,
-        mpi_optimal_gbm_iterations,
-    },
+    cond_error, cond_info,
+    gbn::{GBGRNArgs, infer_gb_network},
 };
 
 /// Parensnet:: Parallel Ensembl Gene Network Construction
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 struct CLIArgs {
-    /// Path to input H5AD file with all the arguments
-    h5ad_file: std::path::PathBuf,
-    /// Path to input H5AD file with all the arguments
-    tf_file: std::path::PathBuf,
-    /// Path to output H5 file with all the arguments
-    out_file: std::path::PathBuf,
+    /// Path to input YAML file with all the arguments
+    config: std::path::PathBuf,
 }
 
 struct CLIInit {
@@ -33,13 +25,7 @@ struct CLIInit {
 
 impl std::fmt::Display for CLIArgs {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "(h5ad_file: {:?}, tf_file: {:?}, out_file: {:?})",
-            self.h5ad_file.to_str(),
-            self.tf_file.to_str(),
-            self.out_file.to_str()
-        )
+        write!(f, "(config: {:?})", self.config)
     }
 }
 
@@ -65,54 +51,40 @@ fn cli_init() -> Result<CLIInit> {
 }
 
 fn run(clid: CLIInit) -> Result<()> {
-    let ndecimals: usize = 3;
     let mcx = &clid.mpi_ifx;
-    let (ad_file, tf_csv) = (
-        clid.args
-            .h5ad_file
-            .to_str()
-            .ok_or(Error::InputReadError("H5AD".to_string()))?
-            .to_owned(),
-        clid.args
-            .tf_file
-            .to_str()
-            .ok_or(Error::InputReadError("H5AD".to_string()))?
-            .to_owned(),
-    );
-
-    cond_info!(mcx.is_root(); "Data H5AD : {}", ad_file);
-    let adata = AnnData::new(&ad_file, Some("_index".to_string()))?;
-    let params: GBMParams = GBMParams {
-        num_threads: 4,
-        verbose: 0,
-        ..Default::default()
-    };
-
-    let config = CVConfig {
-        n_sample_genes: 100,
-        params: params.clone(),
-        ..Default::default()
-    };
-
-    cond_info!(mcx.is_root(); "TF File  : {}", tf_csv);
-    let tf_set = GeneSetAD::new(&adata, tf_csv.as_str(), None, Some(ndecimals))?;
-    cond_info!(mcx.is_root(); "TF Set   : {:?}", tf_set.len());
-    cond_info!(mcx.is_root(); "CV Config : {:?}", config);
-    let opt_args = mpi_optimal_gbm_iterations(&tf_set, &config, mcx)?;
-    if clid.mpi_ifx.is_root() {
-        opt_args.print();
+    cond_info!(mcx.is_root(); "Command Line Arguments : {}", clid.args);
+    // Read input fail
+    let rstr = std::fs::read_to_string(&clid.args.config);
+    if rstr.is_err() {
+        log::error!(
+            "RANK {} :: Failed to read input: {:?}",
+            mcx.rank,
+            rstr.as_ref().err()
+        );
+    }
+    if any_of(rstr.is_err(), clid.mpi_ifx.comm()) {
+        let errv =
+            format!("Failed to read input: {}", clid.args.config.display());
+        cond_error!(mcx.is_root(); "{}", errv);
+        let err = Error::InputReadError(String::from("hello"));
+        return Err(anyhow::Error::from(err));
     }
 
-    cond_info!(mcx.is_root(); "Optimal Median: {} ", opt_args.median);
-    mcx.comm().barrier();
-    cond_info!(mcx.is_root(); " START GRAD BOOSTING", );
-    let params = GBMParams {
-        num_iterations: opt_args.median,
-        ..params
+    let gargs = match serde_saphyr::from_str::<GBGRNArgs>(&rstr?) {
+        Ok(wargs) => {
+            cond_info!(mcx.is_root(); "Parsed successfully: {:?}", wargs);
+            cond_info!(mcx.is_root(); "Data H5AD : {}", wargs.h5ad_file);
+            wargs
+        }
+
+        Err(err) => {
+            cond_error!(mcx.is_root(); "Failed to parse YAML: {}", err);
+            return Err(anyhow::Error::from(err));
+        }
     };
-    let net_edges = mpi_gradient_boosting_grn(&tf_set, mcx, params, true)?;
-    let nedges = sope::reduction::allreduce_sum(&net_edges.len(), mcx.comm());
-    cond_info!(mcx.is_root(); "NET EDGES: {} ", nedges);
+
+    infer_gb_network(&gargs, mcx)?;
+
     Ok(())
 }
 

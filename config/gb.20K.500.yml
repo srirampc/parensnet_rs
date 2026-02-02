@@ -1,0 +1,9 @@
+h5ad_file: "/localscratch/schockalingam6/tmp/pbmc20k.500/adata.20k.500.h5ad"
+tf_csv_file: "data/pbmc/trrust_tf.txt"
+nroundup: 3
+output_file: /localscratch/schockalingam6/tmp/pbmc20k.500/gbnet.20k.500.h5
+mode: gb_grn
+gbm_params:
+  verbose: 0
+  num_threads: 4
+n_sample_genes: 200

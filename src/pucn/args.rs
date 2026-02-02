@@ -1,4 +1,3 @@
-use hdf5::{self, Error as H5Error};
 use log::LevelFilter;
 use serde::{Deserialize, Serialize};
 
@@ -18,16 +17,6 @@ fn default_nrounds() -> usize {
 
 fn default_nsamples() -> usize {
     200
-}
-
-use thiserror::Error;
-
-#[derive(Error, Debug)]
-pub enum InputError {
-    #[error(transparent)]
-    H5(#[from] H5Error),
-    #[error("File {0} is missing")]
-    MissingFileError(String),
 }
 
 // 'NOTSET', 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'
@@ -130,10 +119,6 @@ pub struct WorkflowArgs {
 
     #[serde(default)]
     pub log_level: LogLevel, // = 'DEBUG'
-
-    //#[serde(skip)]
-    //h5_fptr: Option<hdf5::File>,
-
 }
 
 impl WorkflowArgs {
@@ -148,13 +133,4 @@ impl WorkflowArgs {
             self.npairs = (self.nvars * (self.nvars - 1)) / 2;
         }
     }
-
 }
-
-//impl Drop for WorkflowArgs {
-//    fn drop(&mut self) {
-//        if let Some(h5_fptr) = self.h5_fptr.take() {
-//            let _ = h5_fptr.close();
-//        }
-//    }
-//}

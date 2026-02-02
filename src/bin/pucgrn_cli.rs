@@ -6,6 +6,7 @@ use parensnet_rs::{
     cond_error, cond_info,
     pucn::{WorkflowArgs, execute_workflow},
 };
+use sope::reduction::any_of;
 use thiserror::Error;
 
 /// Parensnet:: Parallel Ensembl Gene Network Construction
@@ -52,18 +53,15 @@ fn run(clid: CLIInit) -> Result<()> {
     let mcx = &clid.mpi_ifx;
     cond_info!(mcx.is_root(); "Command Line Arguments : {}", clid.args);
     // Read input fail
-    let mut in_flag: i32 = 1;
     let rstr = std::fs::read_to_string(&clid.args.config);
     if rstr.is_err() {
-        in_flag = 0;
         log::error!(
             "RANK {} :: Failed to read input: {:?}",
             mcx.rank,
             rstr.as_ref().err()
         );
     }
-    let rsum: i32 = mcx.collect_counts(in_flag).iter().sum();
-    if rsum < mcx.size {
+    if any_of(rstr.is_err(), clid.mpi_ifx.comm()) {
         let errv =
             format!("Failed to read input: {}", clid.args.config.display());
         cond_error!(mcx.is_root(); "{}", errv);
@@ -71,23 +69,20 @@ fn run(clid: CLIInit) -> Result<()> {
         return Err(anyhow::Error::from(err));
     }
     // Load Arguments
-    let (wargs, adata) =
-        match serde_saphyr::from_str::<WorkflowArgs>(&rstr?) {
-            Ok(mut wargs) => {
-                cond_info!(mcx.is_root(); "Parsed successfully: {:?}", wargs);
-                cond_info!(mcx.is_root(); "Data H5AD : {}", wargs.h5ad_file);
-                let adata = AnnData::new(
-                    &wargs.h5ad_file,
-                    Some("_index".to_string()),
-                )?;
-                wargs.update_dims(&[adata.nobs, adata.nvars]);
-                (wargs, adata)
-            }
-            Err(err) => {
-                cond_error!(mcx.is_root(); "Failed to parse YAML: {}", err);
-                return Err(anyhow::Error::from(err));
-            }
-        };
+    let (wargs, adata) = match serde_saphyr::from_str::<WorkflowArgs>(&rstr?) {
+        Ok(mut wargs) => {
+            cond_info!(mcx.is_root(); "Parsed successfully: {:?}", wargs);
+            cond_info!(mcx.is_root(); "Data H5AD : {}", wargs.h5ad_file);
+            let adata =
+                AnnData::new(&wargs.h5ad_file, Some("_index".to_string()))?;
+            wargs.update_dims(&[adata.nobs, adata.nvars]);
+            (wargs, adata)
+        }
+        Err(err) => {
+            cond_error!(mcx.is_root(); "Failed to parse YAML: {}", err);
+            return Err(anyhow::Error::from(err));
+        }
+    };
 
     execute_workflow(mcx, &wargs, &adata)?;
     Ok(())

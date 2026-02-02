@@ -34,17 +34,6 @@ pub struct AnnData {
     h5_fptr: hdf5::File,
 }
 
-//struct SortElt<T> {
-//    index: usize,
-//    elt: T,
-//}
-//
-//impl<T> SortElt<T> {
-//    fn new(index: usize, elt: T) -> Self {
-//        Self { elt, index }
-//    }
-//}
-
 pub fn var_gene_names(h5_fptr: &File, index_column: &str) -> Result<Vec<String>> {
     let ds_path = format!("var/{}", index_column);
     let ds = h5_fptr.dataset(ds_path.as_str())?;
@@ -98,6 +87,10 @@ impl AnnData {
 
     pub fn gene_index_map(&self) -> &HashMap<String, usize> {
         &self.gene_id_map
+    }
+
+    pub fn genes_ref(&self) -> &[String] {
+        &self.gene_ids
     }
 
     pub fn gene_at(&self, i: usize) -> &String {
@@ -187,7 +180,7 @@ where
 {
     adata: &'a AnnData,
     genes: Vec<String>, // order of gene names in GeneSetAD
-    _indices: Vec<usize>,
+    indices: Vec<usize>,
     //pub ad_lookup: HashMap<String, usize>, // gene->location in the AnnData object
     gene_lookup: HashMap<String, usize>, // gene name ->location in the expr_matrix
     ad2geneset_map: HashMap<usize, usize>, // location in AnnData -> gene in matrix
@@ -244,7 +237,7 @@ where
                 0..ngenes,
             )),
             genes,
-            _indices: indices,
+            indices,
             adata,
             expr_matrix,
             n_decimals,
@@ -278,7 +271,7 @@ where
             )),
             adata,
             genes,
-            _indices: indices,
+            indices,
             n_decimals,
             expr_matrix,
         })
@@ -298,6 +291,45 @@ where
 
     pub fn expr_matrix_ref(&self) -> &Array2<T> {
         &self.expr_matrix
+    }
+
+    pub fn indices_ref(&self) -> &[usize] {
+        &self.indices
+    }
+
+    pub fn ann_data(&self) -> &AnnData {
+        self.adata
+    }
+
+    pub fn contains_gene(&self, l_gene: &str) -> bool {
+        self.gene_lookup.contains_key(l_gene)
+    }
+
+    pub fn contains(&self, gene_idx: usize) -> bool {
+        self.ad2geneset_map.contains_key(&gene_idx)
+    }
+
+    pub fn gene_index(&self, ad_gene_idx: usize) -> Result<usize> {
+        let i = self
+            .ad2geneset_map
+            .get(&ad_gene_idx)
+            .ok_or(AnnDataError::MissingGeneError(format!("{}", ad_gene_idx)))?;
+        Ok(*i)
+    }
+
+    pub fn column_for(&self, target_gene: &str) -> Result<Array1<T>> {
+        let gene_idx = self
+            .gene_lookup
+            .get(target_gene)
+            .ok_or(AnnDataError::MissingGeneError(target_gene.to_owned()))?;
+        Ok(self.expr_matrix.column(*gene_idx).to_owned())
+    }
+
+    pub fn column(&self, ad_gene_index: usize) -> Result<Array1<T>> {
+        let gene_idx = self.ad2geneset_map.get(&ad_gene_index).ok_or(
+            AnnDataError::MissingGeneError(format!("{}", ad_gene_index)),
+        )?;
+        Ok(self.expr_matrix.column(*gene_idx).to_owned())
     }
 
     fn expr_matrix_sub_i(&self, i: usize) -> Array2<T> {
@@ -332,46 +364,11 @@ where
         Ok(self.expr_matrix_sub_i(*i))
     }
 
-    pub fn gene_index(&self, ad_gene_idx: usize) -> Result<usize> {
-        let i = self
-            .ad2geneset_map
-            .get(&ad_gene_idx)
-            .ok_or(AnnDataError::MissingGeneError(format!("{}", ad_gene_idx)))?;
-        Ok(*i)
-    }
-
     pub fn expr_matrix_sub_gene_index(
         &self,
         ad_gene_idx: usize,
     ) -> Result<Array2<T>> {
         let i = self.gene_index(ad_gene_idx)?;
         Ok(self.expr_matrix_sub_i(i))
-    }
-
-    pub fn column_for(&self, target_gene: &str) -> Result<Array1<T>> {
-        let gene_idx = self
-            .gene_lookup
-            .get(target_gene)
-            .ok_or(AnnDataError::MissingGeneError(target_gene.to_owned()))?;
-        Ok(self.expr_matrix.column(*gene_idx).to_owned())
-    }
-
-    pub fn column(&self, ad_gene_index: usize) -> Result<Array1<T>> {
-        let gene_idx = self.ad2geneset_map.get(&ad_gene_index).ok_or(
-            AnnDataError::MissingGeneError(format!("{}", ad_gene_index)),
-        )?;
-        Ok(self.expr_matrix.column(*gene_idx).to_owned())
-    }
-
-    pub fn contains_gene(&self, l_gene: &str) -> bool {
-        self.gene_lookup.contains_key(l_gene)
-    }
-
-    pub fn contains(&self, gene_idx: usize) -> bool {
-        self.ad2geneset_map.contains_key(&gene_idx)
-    }
-
-    pub fn ann_data(&self) -> &AnnData {
-        self.adata
     }
 }
