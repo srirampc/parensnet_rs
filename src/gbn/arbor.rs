@@ -179,16 +179,17 @@ fn train_for_target(
     tgt_id: usize,
     params: &GBMParams,
 ) -> Result<Booster> {
+    let params = params.as_json();
     let t_booster = if tf_set.contains(tgt_id) {
         // TODO:: Use the cache for gene_id
         let expr_mat = tf_set.expr_matrix_sub_gene_index(tgt_id)?;
-        train(expr_mat.view(), tgt_label.view(), None, params.as_json())?
+        train(expr_mat.view(), tgt_label.view(), None, &params)?
     } else {
         train(
             tf_set.expr_matrix_ref().view(),
             tgt_label.view(),
             None,
-            params.as_json(),
+            &params,
         )?
     };
     Ok(t_booster)

@@ -1,5 +1,6 @@
 use log::LevelFilter;
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 
 // 'NOTSET', 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'
 #[repr(usize)]
@@ -21,8 +22,8 @@ pub enum LogLevel {
 
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 pub enum RunMode {
-    #[serde(alias = "optimal_iterations")]
-    OptimalIterations,
+    #[serde(alias = "cv_gb")]
+    GBCrossFoldValidation,
     #[serde(alias = "gb_grn")]
     GBGRNet,
 }
@@ -35,7 +36,7 @@ pub struct GBMParams {
     pub num_threads: i32,
     #[serde(default = "GBMParams::default_iterations")]
     pub num_iterations: usize,
-    #[serde(default = "GBMParams::default_rounds")]
+    #[serde(default = "GBMParams::default_early_stopping_rounds")]
     pub early_stopping_rounds: usize,
     #[serde(default = "GBMParams::default_bagging_fraction")]
     pub bagging_fraction: f32,
@@ -60,7 +61,7 @@ impl GBMParams {
         300
     }
 
-    fn default_rounds() -> usize {
+    fn default_early_stopping_rounds() -> usize {
         10
     }
 
@@ -87,7 +88,7 @@ impl Default for GBMParams {
             verbose: Self::default_verbose(),
             num_threads: Self::default_threads(),
             num_iterations: Self::default_iterations(),
-            early_stopping_rounds: Self::default_rounds(),
+            early_stopping_rounds: Self::default_early_stopping_rounds(),
             bagging_fraction: Self::default_bagging_fraction(),
             bagging_freq: Self::default_bagging_freq(),
             metric: Self::default_metric(),
@@ -97,7 +98,7 @@ impl Default for GBMParams {
 }
 
 impl GBMParams {
-    pub fn as_json(&self) -> serde_json::Value {
+    pub fn as_json(&self) -> Value {
         serde_json::json! {{
             "objective": "regression",
             "verbose": self.verbose,
@@ -110,6 +111,23 @@ impl GBMParams {
             "metric": self.metric,
         }}
     }
+
+    pub fn as_json_with_seed(&self) -> Value {
+        let mut g_parms = self.as_json();
+        let seed_params = json! {{
+            "seed": 72,
+            "bagging_seed": 72,
+            "feature_fraction_seed": 72,
+        }};
+        if let (Value::Object(gpx), Value::Object(spy)) =
+            (&mut g_parms, seed_params)
+        {
+            for (k, v) in spy {
+                gpx.entry(k).or_insert(v);
+            }
+        }
+        g_parms
+    }
 }
 
 // Cross-Validation Configuration
@@ -120,6 +138,9 @@ pub struct CVConfig {
     pub max_rounds: usize,     // Maximum boosting rounds to try (e.g., 500)
     pub early_stopping_rounds: usize, // Patience for early stopping (e.g., 10)
     // min_rounds: usize,            // TODO:Minimum rounds to train (e.g., 20)
+    pub min_iterations: usize,
+    pub max_empty_rounds: usize,
+    pub score_tolerance: f64,
     pub params: GBMParams,
 }
 
@@ -130,8 +151,21 @@ impl Default for CVConfig {
             n_sample_genes: 200, // Sample 200 genes for CV
             max_rounds: 500,
             early_stopping_rounds: 10,
+            min_iterations: 40,
+            max_empty_rounds: 5,
+            score_tolerance: 1e-4,
             params: GBMParams::default(),
         }
+    }
+}
+
+impl CVConfig {
+    pub fn es_params(&self) -> serde_json::Value {
+        serde_json::json! {{
+            "min_iterations": self.min_iterations,
+            "max_empty_rounds": self.max_empty_rounds,
+            "score_tolerance": self.score_tolerance,
+        }}
     }
 }
 
@@ -150,6 +184,15 @@ fn default_filter() -> Option<f64> {
 fn default_n_samples() -> usize {
     200
 }
+
+fn default_skip_cv() -> bool {
+    false
+}
+
+fn default_num_iterations() -> usize {
+    32
+}
+
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct GBGRNArgs {
@@ -178,4 +221,10 @@ pub struct GBGRNArgs {
 
     #[serde(default = "default_n_samples")]
     pub n_sample_genes: usize,
+
+    #[serde(default = "default_skip_cv")]
+    pub skip_cv: bool,
+
+    #[serde(default = "default_num_iterations")]
+    pub num_iterations: usize,
 }

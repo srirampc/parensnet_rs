@@ -7,7 +7,7 @@ use thiserror::Error;
 use parensnet_rs::{
     comm::CommIfx,
     cond_error, cond_info,
-    gbn::{GBGRNArgs, infer_gb_network},
+    gbn::{GBGRNArgs, RunMode, infer_gb_network, run_cross_fold_gbm},
 };
 
 /// Parensnet:: Parallel Ensembl Gene Network Construction
@@ -83,7 +83,14 @@ fn run(clid: CLIInit) -> Result<()> {
         }
     };
 
-    infer_gb_network(&gargs, mcx)?;
+    match gargs.mode {
+        RunMode::GBGRNet => {
+            infer_gb_network(&gargs, mcx)?;
+        }
+        RunMode::GBCrossFoldValidation => {
+            run_cross_fold_gbm(&gargs, mcx)?;
+        }
+    };
 
     Ok(())
 }

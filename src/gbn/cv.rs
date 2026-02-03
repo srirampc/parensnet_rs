@@ -86,6 +86,8 @@ pub fn cross_validate_target(
         num_iterations: config.max_rounds,
         ..config.params.clone()
     };
+    let params = gb_params.as_json();
+    let es_params = config.es_params();
 
     for (fold_idx, (train_idx, val_idx)) in splits.iter().enumerate() {
         log::info!("  Fold {}/{}", fold_idx + 1, config.n_folds);
@@ -93,7 +95,8 @@ pub fn cross_validate_target(
             data_matrix,
             label,
             (train_idx, val_idx),
-            gb_params.clone(),
+            &params,
+            &es_params,
         )?;
         best_iterations.push(result.num_iterations() as usize);
     }
@@ -101,30 +104,35 @@ pub fn cross_validate_target(
     Ok(best_iterations)
 }
 
-pub struct OptimalGBM {
+pub struct CVStats {
     pub all_rounds: Vec2d<usize>,
     pub sorted_rounds: Vec<usize>,
     pub mean: f64,
-    pub variance: f64,
+    pub stdev: f64,
     pub median: usize,
+    pub p25: usize,
+    pub p75: usize,
 }
 
-impl Display for OptimalGBM {
+impl Display for CVStats {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "[Mean: {} ; Median: {}; Variance: {:.2}; Std. dev: {:.2}; Range: {} - {}]",
-            self.mean,
+            "[Median: {}; Mean: {:.2}; Std. dev.: {:.2}; CV: {:.2},\
+                P25: {}; P75 {} Range: {} - {}]",
             self.median,
-            self.variance,
-            self.variance.sqrt(),
+            self.mean,
+            self.stdev,
+            self.stdev / self.mean,
+            self.p25,
+            self.p75,
             self.sorted_rounds[0],
             self.sorted_rounds[self.sorted_rounds.len() - 1]
         )
     }
 }
 
-impl OptimalGBM {
+impl CVStats {
     pub fn new(
         all_rounds: Vec<usize>,
         n_sample_genes: usize,
@@ -144,20 +152,24 @@ impl OptimalGBM {
         let mut sorted_rounds = all_rounds.clone();
         sorted_rounds.sort_unstable();
         let median_rounds = sorted_rounds[sorted_rounds.len() / 2];
+        let p25 = sorted_rounds[sorted_rounds.len() / 4];
+        let p75 = sorted_rounds[3 * sorted_rounds.len() / 4];
 
         Self {
             all_rounds: Vec2d::new(all_rounds, n_sample_genes, n_folds),
             sorted_rounds,
             mean: mean_rounds,
-            variance,
+            stdev: variance.sqrt(),
             median: median_rounds,
+            p25,
+            p75,
         }
     }
     pub fn print(&self) {
         println!("\n=== Cross-Validation Results ===");
-        println!("Mean optimal rounds: {}", self.mean);
-        println!("Std dev: {:.2}", self.variance.sqrt());
-        println!("Median optimal rounds: {}", self.median);
+        println!("CV Mean rounds: {}", self.mean);
+        println!("CV rounds Std dev: {:.2}", self.stdev);
+        println!("CV Median CV rounds: {}", self.median);
         println!(
             "Range: {} - {}",
             self.sorted_rounds[0],
@@ -166,11 +178,11 @@ impl OptimalGBM {
     }
 }
 
-pub fn optimal_gbm_iterations(
+pub fn cv_gbm(
     adata: &AnnData,
     tf_set: &GeneSetAD<f32>,
     config: &CVConfig,
-) -> Result<OptimalGBM> {
+) -> Result<CVStats> {
     let mut rng = rand::rng();
     let mut var_indices: Vec<usize> = (0..adata.nvars).collect();
     var_indices.shuffle(&mut rng);
@@ -201,7 +213,7 @@ pub fn optimal_gbm_iterations(
         .iter()
         .flat_map(|gene_rounds| gene_rounds.iter().copied())
         .collect();
-    Ok(OptimalGBM::new(
+    Ok(CVStats::new(
         all_rounds,
         config.n_sample_genes,
         config.n_folds,
@@ -338,6 +350,10 @@ impl<'a> DistCVConfig<'a> {
             self.current_sample_kfold.borrow().1.split_for(fold_id)
         }
     }
+
+    fn es_params(&self) -> serde_json::Value {
+        self.config.es_params()
+    }
 }
 
 // Cross-Validation for One Target Gene
@@ -348,6 +364,8 @@ fn dist_cross_validate(
     config: &DistCVConfig,
 ) -> Result<Vec<usize>> {
     let gb_params = config.gbm_params();
+    let params = gb_params.as_json_with_seed();
+    let es_params = config.es_params();
 
     let mut best_iterations: Vec<usize> = Vec::new();
     for ((train_idx, val_idx), tgt_id) in config.run_range().map(|run_id| {
@@ -364,14 +382,16 @@ fn dist_cross_validate(
                 expr_mat.view(),
                 tgt_label.view(),
                 (&train_idx, &val_idx),
-                gb_params.clone(),
+                &params,
+                &es_params,
             )?
         } else {
             train_with_early_stopping(
                 tf_set.expr_matrix_ref().view(),
                 tgt_label.view(),
                 (&train_idx, &val_idx),
-                gb_params.clone(),
+                &params,
+                &es_params,
             )?
         };
         best_iterations.push(cv_iters.num_iterations() as usize);
@@ -379,11 +399,11 @@ fn dist_cross_validate(
     Ok(best_iterations)
 }
 
-pub fn mpi_optimal_gbm_iterations(
+pub fn mpi_cv_gbm(
     tf_set: &GeneSetAD<f32>,
     config: &CVConfig,
     mpi_ifx: &CommIfx,
-) -> Result<OptimalGBM> {
+) -> Result<CVStats> {
     sope::cond_info!(mpi_ifx.is_root(); "START INIT CONFIG LOAD");
     let ndata = tf_set.ann_data().nobs;
     let d_config = DistCVConfig::new(ndata, config, mpi_ifx);
@@ -433,7 +453,7 @@ pub fn mpi_optimal_gbm_iterations(
         mpi_ifx.is_root(); "ALL ROUNDS : {} {:?}", all_rounds.len(), all_rounds
     );
     let opt_gbm =
-        OptimalGBM::new(all_rounds, config.n_sample_genes, config.n_folds);
+        CVStats::new(all_rounds, config.n_sample_genes, config.n_folds);
 
     if log::log_enabled!(log::Level::Info) {
         mpi_ifx.comm().barrier();

@@ -2,7 +2,6 @@ use anyhow::Result;
 use lightgbm3::{Booster, Dataset};
 use ndarray::{ArrayView1, ArrayView2, Axis};
 
-use super::args::GBMParams;
 use crate::{anndata::AnnData, util::around};
 
 // use lightgbm3_sys;
@@ -48,7 +47,7 @@ pub fn train(
     data_matrix: ArrayView2<f32>,
     label: ArrayView1<f32>,
     train_idx: Option<&[usize]>,
-    params: serde_json::Value,
+    params: &serde_json::Value,
 ) -> Result<Booster> {
     let x_matrix;
     let x_label;
@@ -68,14 +67,14 @@ pub fn train(
         true,
     )?;
 
-    Ok(Booster::train(train_data, &params)?)
+    Ok(Booster::train(train_data, params)?)
 }
 
 pub fn train_ad(
     adata: &AnnData,
     label_index: usize,
     train_idx: &[usize],
-    params: serde_json::Value,
+    params: &serde_json::Value,
     n_decimals: usize,
 ) -> Result<Booster> {
     let label = around(adata.read_column(label_index)?.view(), n_decimals);
@@ -89,7 +88,7 @@ pub fn train_with_early_stopping_ad(
     adata: &AnnData,
     label_index: usize,
     indices: (&[usize], &[usize]),
-    gb_params: GBMParams,
+    gb_params: &serde_json::Value,
     n_decimals: usize,
 ) -> Result<Booster> {
     let label = adata.read_column(label_index)?;
@@ -116,8 +115,8 @@ pub fn train_with_early_stopping_ad(
         Some(&train_data),
     )?;
 
-    let params = gb_params.as_json();
-    let booster = Booster::train_with_valid(train_data, Some(val_data), &params)?;
+    //let params = gb_params.as_json();
+    let booster = Booster::train_with_valid(train_data, Some(val_data), gb_params)?;
     Ok(booster)
 }
 
@@ -125,7 +124,8 @@ pub fn train_with_early_stopping(
     data_matrix: ArrayView2<f32>,
     label: ArrayView1<f32>,
     indices: (&[usize], &[usize]),
-    gb_params: GBMParams,
+    gb_params: &serde_json::Value,
+    es_params: &serde_json::Value,
 ) -> Result<Booster> {
     let nfeatures = data_matrix.shape()[1] as i32;
     let (train_idx, val_idx) = indices;
@@ -150,8 +150,11 @@ pub fn train_with_early_stopping(
         Some(&train_data),
     )?;
 
-    let params = gb_params.as_json();
-    let booster = Booster::train_with_valid(train_data, Some(val_data), &params)?;
+    //let params = gb_params.as_json();
+    //let booster = Booster::train_with_valid(train_data, Some(val_data), &params)?;
+    let booster = Booster::train_with_early_stopping(
+        train_data, val_data, gb_params, es_params,
+    )?;
     //booster.feature_importance(importance_type)
     Ok(booster)
 }
