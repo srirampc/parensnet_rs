@@ -34,6 +34,15 @@ pub struct AnnData {
     h5_fptr: hdf5::File,
 }
 
+pub fn xds_dimensions(ad_fname: &str) -> Result<(usize, usize)> {
+    let h5_fptr = hdf5::File::open(ad_fname)?;
+    let ds = h5_fptr.dataset("X")?;
+    let dims = ds.shape();
+    ensure_eq!(dims.len(), 2);
+    let (nobs, nvars) = (dims[0], dims[1]);
+    Ok((nobs, nvars))
+}
+
 pub fn var_gene_names(h5_fptr: &File, index_column: &str) -> Result<Vec<String>> {
     let ds_path = format!("var/{}", index_column);
     let ds = h5_fptr.dataset(ds_path.as_str())?;

@@ -1,16 +1,19 @@
-use hdf5::{H5Type};
+use hdf5::H5Type;
 use mpi::collective::SystemOperation;
-use mpi::traits::{AsRaw, CommunicatorCollectives};
+use mpi::traits::AsRaw;
 use ndarray::{Array1, Array2};
+use sope::{
+    partition::{self, Dist, InterleavedDist},
+    reduction::{allreduce_sum, exclusive_scan},
+};
 
-use crate::comm::CommIfx;
-use crate::cond_debug;
-use crate::util::block_range;
+use crate::{comm::CommIfx, cond_debug};
 
 pub fn block_read1d<T: H5Type>(
     mcx: &CommIfx,
     fname: &str,
     dataset: &str,
+    dist: Option<&dyn partition::Dist>,
 ) -> Result<Array1<T>, hdf5::Error> {
     let file = hdf5::File::with_options()
         .with_fapl(|fapl| {
@@ -22,7 +25,11 @@ pub fn block_read1d<T: H5Type>(
     let ds = file.dataset(dataset)?;
     cond_debug!(mcx.rank == 0 ; "Shape :: {:?} ", ds.shape());
 
-    let srange = block_range(mcx.rank, mcx.size, ds.shape()[0]);
+    let srange = if let Some(dist) = dist {
+        dist.range_at(mcx.rank)
+    } else {
+        InterleavedDist::new(ds.shape()[0], mcx.size, mcx.rank).range()
+    };
     let rdata: ndarray::Array1<T> =
         ds.as_reader().coll_read_slice_1d(ndarray::s![srange])?;
     cond_debug!(mcx.rank == 0 ; "RShape :: {:?} ", rdata.shape());
@@ -33,6 +40,7 @@ pub fn block_read2d<T: H5Type>(
     mcx: &CommIfx,
     fname: &str,
     dataset: &str,
+    dist: Option<&dyn partition::Dist>,
 ) -> Result<Array2<T>, hdf5::Error> {
     //
     let file = hdf5::File::with_options()
@@ -45,7 +53,12 @@ pub fn block_read2d<T: H5Type>(
     let ds = file.dataset(dataset)?;
     cond_debug!(mcx.rank == 0 ; "Shape :: {:?} ", ds.shape());
 
-    let srange = block_range(mcx.rank, mcx.size, ds.shape()[0]);
+    let srange = if let Some(dist) = dist {
+        dist.range_at(mcx.rank)
+    } else {
+        InterleavedDist::new(ds.shape()[0], mcx.size, mcx.rank).range()
+    };
+
     let rdata: ndarray::Array2<T> =
         ds.as_reader().coll_read_slice_2d(ndarray::s![srange, ..])?;
     cond_debug!(mcx.rank == 0 ; "RShape :: {:?} ", rdata.shape());
@@ -58,17 +71,17 @@ pub fn block_write1d<T: H5Type>(
     dsname: &str,
     data: &ndarray::Array1<T>,
 ) -> Result<(), hdf5::Error> {
-    let mut n_data: usize = 0;
-    mcx.comm()
-        .all_reduce_into(&(data.len()), &mut n_data, SystemOperation::sum());
-    let s_range = block_range(mcx.rank, mcx.size, n_data);
+    let n_data = allreduce_sum(&(data.len()), mcx.comm());
+    let b_start =
+        exclusive_scan(&(data.len()), mcx.comm(), SystemOperation::sum());
+    let b_end = b_start + data.len();
     h_group
         .new_dataset_builder()
         .empty::<T>()
         .shape(hdf5::Extents::from(n_data))
         .create(dsname)?
         .as_writer()
-        .coll_write_slice(data, ndarray::s![s_range])?;
+        .coll_write_slice(data, ndarray::s![b_start..b_end])?;
     Ok(())
 }
 
@@ -78,21 +91,17 @@ pub fn block_write2d<T: H5Type>(
     dsname: &str,
     data: &ndarray::Array2<T>,
 ) -> Result<(), hdf5::Error> {
-    let mut n_rows: usize = 0;
-    mcx.comm().all_reduce_into(
-        &(data.nrows()),
-        &mut n_rows,
-        SystemOperation::sum(),
-    );
-
-    let srange = block_range(mcx.rank, mcx.size, n_rows);
+    let n_rows = allreduce_sum(&(data.nrows()), mcx.comm());
+    let row_start =
+        exclusive_scan(&(data.nrows()), mcx.comm(), SystemOperation::sum());
+    let row_end = row_start + data.nrows();
     h_group
         .new_dataset_builder()
         .empty::<T>()
         .shape(hdf5::Extents::from([n_rows, data.ncols()]))
         .create(dsname)?
         .as_writer()
-        .coll_write_slice(data, ndarray::s![srange, ..])?;
+        .coll_write_slice(data, ndarray::s![row_start..row_end, ..])?;
     Ok(())
 }
 

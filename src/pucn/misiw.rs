@@ -72,7 +72,7 @@ struct NodeCollection<IntT, FloatT> {
     hist_sizes: Vec<IntT>,
     bin_starts: Vec<usize>,
     hist_starts: Vec<usize>,
-
+    // bins/hist flattened to a histogram
     abins: Array1<FloatT>,
     ahist: Array1<FloatT>,
 }
@@ -137,6 +137,14 @@ impl<IntT, FloatT> NodeCollection<IntT, FloatT> {
         let bsize = self.bin_sizes[idx].to_usize().unwrap();
         let bend = bstart + bsize;
         self.abins.slice(ndarray::s![bstart..bend])
+    }
+
+    fn len(&self) -> usize {
+        self.hist_sizes.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.hist_sizes.is_empty()
     }
 }
 
@@ -210,8 +218,8 @@ impl<'a> MISIWorkFlow<'a> {
         let columns = self.wdistr.var_dist[rank as usize].clone();
         let rdata = self.adata.read_range_data::<f32>(columns.clone())?;
         let var_data: Vec<Node<i32, f32>> = columns
-            .into_iter()
-            .map(|i| Node::<i32, f32>::from_data(rdata.column(i)))
+            .into_iter().enumerate()
+            .map(|(i, _cx)| Node::<i32, f32>::from_data(rdata.column(i)))
             .collect();
         NodeCollection::<i32, f32>::from_nodes(&var_data, self.mpi_ifx.comm())
     }
@@ -226,7 +234,7 @@ impl<'a> MISIWorkFlow<'a> {
             self.wdistr.pairs2d.batch_ranges.at(bidx, rank as usize);
         let row_data = self.adata.read_range_data::<f32>(rows.clone())?;
         let col_data = self.adata.read_range_data::<f32>(cols.clone())?;
-        let row_data = &row_data;
+        //let row_data = &row_data;
         let col_data = &col_data;
 
         let node_pairs = rows
@@ -269,8 +277,9 @@ impl<'a> MISIWorkFlow<'a> {
 
     pub fn run(&self) -> Result<()> {
         let nodes = self.construct_nodes(self.mpi_ifx.rank)?;
-        let node_pairs = self.construct_node_pairs(self.mpi_ifx.rank, &nodes)?;
-        println!("Done {}", node_pairs.len());
+        println!("Done {}", nodes.len());
+        //let node_pairs = self.construct_node_pairs(self.mpi_ifx.rank, &nodes)?;
+        //println!("Done {}", node_pairs.len());
         Ok(())
     }
 }

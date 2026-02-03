@@ -151,7 +151,7 @@ impl Default for CVConfig {
             n_sample_genes: 200, // Sample 200 genes for CV
             max_rounds: 500,
             early_stopping_rounds: 10,
-            min_iterations: 40,
+            min_iterations: 32,
             max_empty_rounds: 5,
             score_tolerance: 1e-4,
             params: GBMParams::default(),

@@ -1,14 +1,15 @@
 use anyhow::Result;
 use clap::Parser;
 use mpi::traits::{Communicator, CommunicatorCollectives, Root};
+use ndarray::{Array1, Array2};
 use parensnet_rs::{
     comm::CommIfx,
     h5::mpio::{
         block_read1d, block_read2d, block_write1d, block_write2d, create_file,
         create_write2d,
     },
-    util::Vec2d,
     pucn::{collect_samples, generate_samples},
+    util::Vec2d,
     {cond_error, cond_info, cond_println},
 };
 use serde::{Deserialize, Serialize};
@@ -39,14 +40,22 @@ fn print_data_dist(comm_ifx: &CommIfx, ldata: usize) {
     cond_println!(comm_ifx.is_root(); "ndata :: {:?} ; tdata: {}", ndata, tdata);
 }
 
-fn test_puc(comm_ifx: &CommIfx, wargs: &InArgs) {
-    let idx_data: ndarray::Array2<i32> =
-        block_read2d(comm_ifx, &wargs.hdf_in, "data/index").unwrap();
+fn test_read_puc(
+    comm_ifx: &CommIfx,
+    wargs: &InArgs,
+) -> (Array2<i32>, Array1<f32>) {
+    let idx_data: Array2<i32> =
+        block_read2d(comm_ifx, &wargs.hdf_in, "data/index", None).unwrap();
     print_data_dist(comm_ifx, idx_data.shape()[0]);
-    let puc_data: ndarray::Array1<f32> =
-        block_read1d(comm_ifx, &wargs.hdf_in, "data/puc").unwrap();
+    let puc_data: Array1<f32> =
+        block_read1d(comm_ifx, &wargs.hdf_in, "data/puc", None).unwrap();
     print_data_dist(comm_ifx, puc_data.shape()[0]);
 
+    (idx_data, puc_data)
+}
+
+fn test_puc(comm_ifx: &CommIfx, wargs: &InArgs) {
+    let (idx_data, puc_data) = test_read_puc(comm_ifx, wargs);
     let h_file = create_file(comm_ifx, &wargs.hdf_out2).unwrap();
     let h_group = h_file.create_group("data").unwrap();
     block_write2d(comm_ifx, &h_group, "index", &idx_data).unwrap();
@@ -54,8 +63,8 @@ fn test_puc(comm_ifx: &CommIfx, wargs: &InArgs) {
 }
 
 fn test_index(comm_ifx: &CommIfx, wargs: &InArgs) {
-    let rdata: ndarray::Array2<i32> =
-        block_read2d(comm_ifx, &wargs.hdf_in, "data/index").unwrap();
+    let rdata: Array2<i32> =
+        block_read2d(comm_ifx, &wargs.hdf_in, "data/index", None).unwrap();
     print_data_dist(comm_ifx, rdata.shape()[0]);
     create_write2d(comm_ifx, &wargs.hdf_out, "data", "index", &rdata).unwrap();
 }
@@ -83,10 +92,7 @@ fn test_h5(mcx: &CommIfx, args: &CLIArgs) -> Result<()> {
     Ok(())
 }
 
-fn test_samples(
-    mcx: &CommIfx,
-    args: &CLIArgs,
-) -> Result<Vec2d<usize>> {
+fn test_samples(mcx: &CommIfx, args: &CLIArgs) -> Result<Vec2d<usize>> {
     let wargs = parse_args(mcx, args)?;
     let mut sample_arr = if mcx.is_root() {
         generate_samples(wargs.nvars, wargs.nrounds, wargs.nsamples)

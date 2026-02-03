@@ -1,7 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
 use parensnet_rs::{
-    anndata::AnnData,
+    anndata::xds_dimensions,
     comm::CommIfx,
     cond_error, cond_info,
     pucn::{WorkflowArgs, execute_workflow},
@@ -69,14 +69,13 @@ fn run(clid: CLIInit) -> Result<()> {
         return Err(anyhow::Error::from(err));
     }
     // Load Arguments
-    let (wargs, adata) = match serde_saphyr::from_str::<WorkflowArgs>(&rstr?) {
+    let wargs = match serde_saphyr::from_str::<WorkflowArgs>(&rstr?) {
         Ok(mut wargs) => {
             cond_info!(mcx.is_root(); "Parsed successfully: {:?}", wargs);
             cond_info!(mcx.is_root(); "Data H5AD : {}", wargs.h5ad_file);
-            let adata =
-                AnnData::new(&wargs.h5ad_file, Some("_index".to_string()))?;
-            wargs.update_dims(&[adata.nobs, adata.nvars]);
-            (wargs, adata)
+            let (nobs, nvars) = xds_dimensions(&wargs.h5ad_file)?;
+            wargs.update_dims(&[nobs, nvars]);
+            wargs
         }
         Err(err) => {
             cond_error!(mcx.is_root(); "Failed to parse YAML: {}", err);
@@ -84,7 +83,7 @@ fn run(clid: CLIInit) -> Result<()> {
         }
     };
 
-    execute_workflow(mcx, &wargs, &adata)?;
+    execute_workflow(mcx, &wargs)?;
     Ok(())
 }
 

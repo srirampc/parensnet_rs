@@ -5,5 +5,5 @@
 	path = ext/sope
 	url = https://github.com/srirampc/sope.git
 [submodule "ext/lightgbm-3"]
-	path = ext/lightgbm-3
+	path = ext/lightgbm3-rs
 	url = https://github.com/srirampc/lightgbm3-rs.git

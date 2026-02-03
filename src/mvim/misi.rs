@@ -611,6 +611,7 @@ where
             },
         }
     }
+
     fn get_puc_factor(&self, about: IntT, target: IntT) -> Result<FloatT, Error> {
         let ridx = self.range_of(about)?;
         let pfactor = match &self.lmr_ds {
@@ -742,22 +743,28 @@ mod tests {
     #[test]
     pub fn test_misi_range_pair_full() -> Result<()> {
         crate::tests::log_init();
-        let bprange = MISIRangePair::<i32, f32>::new(&MISI_H5, (0..6, 0..6))?;
+        let mut bprange = MISIRangePair::<i32, f32>::new(&MISI_H5, (0..6, 0..6))?;
         for ((pi, pj), (rmi, rpuc)) in PAIRS_MI_PUC.iter() {
             let (i, j) = (*pi, *pj);
             let pmi = bprange.get_mi(i, j)?;
             let ppuc = bprange.accumulate_redundancies(i, j)?;
             let lpuc = bprange.compute_lm_puc(i, j)?;
+            bprange.set_lmr_ds(None)?;
+            assert!(bprange.lmr_ds.is_some());
+            let dspuc = bprange.compute_lm_puc(i, j)?;
             let mi_diff = (rmi - pmi).abs() < 1e-4;
             let puc_diff = (rpuc - ppuc).abs() < 1e-3;
             let lpuc_diff = (rpuc - lpuc).abs() < 1e-3;
+            let dspuc_diff = (dspuc - lpuc).abs() < 1e-3;
             debug!(
-                "i, j: ({}, {}); MIs ({}, {}, {}); PUC: ({} {} {} {} {})",
+                "i, j: ({}, {}); MIs ({}, {}, {}); PUC: [({} ({} {}) ({} {}) ({} {})]",
                 i, j, rmi, pmi, mi_diff, rpuc, ppuc, puc_diff, lpuc, lpuc_diff,
+                dspuc, dspuc_diff,
             );
             assert!(mi_diff);
             assert!(puc_diff);
             assert!(lpuc_diff);
+            assert!(dspuc_diff);
         }
         Ok(())
     }

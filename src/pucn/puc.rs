@@ -5,13 +5,17 @@ use crate::{
     comm::CommIfx,
     cond_info,
     h5::mpio::{block_write1d, block_write2d, create_file},
-    mvim::{misi::MISIRangePair, rv::Error as RVError, rv::MRVTrait},
+    mvim::{
+        misi::MISIRangePair,
+        rv::{Error as RVError, MRVTrait},
+    },
     util::{RangePair, Vec2d},
 };
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use hdf5::Error as H5Error;
 use ndarray::{Array1, Array2, ArrayView1};
+use sope::reduction::any_of;
 
 pub type PUCResults = IdVResults<i32, f32>;
 
@@ -21,6 +25,14 @@ fn save_puc(
     puc_file: &str,
 ) -> Result<(), H5Error> {
     let h_file = create_file(mpi_ifx, puc_file)?;
+    cond_info!(
+        mpi_ifx.is_root();
+        "Saving Data :: {:?} {:?} {}",
+        puc_results.index.shape(),
+        puc_results.val.shape(),
+        puc_file,
+    );
+    sope::gather_debug!(mpi_ifx.comm(); "{:?}", puc_results.len());
     let h_group = h_file.create_group("data").unwrap();
     block_write2d(mpi_ifx, &h_group, "index", &puc_results.index)?;
     block_write1d(mpi_ifx, &h_group, "puc", &puc_results.val)?;
@@ -58,14 +70,14 @@ impl<'a> SampledPUCWorkflow<'a> {
     fn run_st_ranges(
         &self,
         st_ranges: &RangePair<usize>,
-        r_samples: &Option<Vec2d<i32>>,
+        r_samples: Option<&Vec2d<i32>>,
     ) -> Result<PUCResults> {
         let m_range = MISIRangePair::<i32, f32>::new(
-            &self.args.h5ad_file,
+            &self.args.misi_data_file,
             st_ranges.clone(),
         )?;
         let r_pindex = pair_indices(st_ranges.clone());
-        let mut r_pucs = Array1::from_vec(vec![0.0f32; r_pindex.len()]);
+        let mut r_pucs = Array1::from_vec(vec![0.0f32; r_pindex.nrows()]);
         for (idx, st_row) in r_pindex.rows().into_iter().enumerate() {
             r_pucs[idx] = match r_samples {
                 Some(samples_vec) => {
@@ -83,7 +95,7 @@ impl<'a> SampledPUCWorkflow<'a> {
     fn run_batch(
         &self,
         bid: usize,
-        rsamples: &Option<Vec2d<i32>>,
+        rsamples: Option<&Vec2d<i32>>,
     ) -> Result<PUCResults> {
         self.run_st_ranges(
             self.wdistr
@@ -103,21 +115,30 @@ impl<'a> SampledPUCWorkflow<'a> {
             self.args.nrounds,
             self.args.nsamples,
         ) {
-            Ok(samples_vec) => Some(samples_vec),
+            Ok(samples_vec) => {
+                cond_info!(
+                    self.mpi_ifx.is_root();
+                    "Running with {:?} Samples Generated", samples_vec.shape()
+                );
+                Some(samples_vec)
+            }
             Err(err) => {
-                cond_info!(self.mpi_ifx.is_root(); "{} No Samples; Running Full PUC", err);
+                cond_info!(
+                    self.mpi_ifx.is_root();
+                    "{} No Samples; Running Full PUC", err
+                );
                 None
             }
         };
         let bat_results: Result<Vec<_>> = (0..nbatches)
-            .map(|bidx| self.run_batch(bidx, &rsamples))
+            .map(|bidx| self.run_batch(bidx, rsamples.as_ref()))
             .collect();
         match bat_results {
-            Ok(vpair_reds) => Ok(save_puc(
-                PUCResults::merge(&vpair_reds),
-                self.mpi_ifx,
-                &self.args.puc_file,
-            )?),
+            Ok(vpair_reds) => {
+                let merged_results = PUCResults::merge(&vpair_reds);
+                save_puc(merged_results, self.mpi_ifx, &self.args.puc_file)?;
+                Ok(())
+            }
             Err(err) => Err(err),
         }
     }
@@ -138,7 +159,8 @@ impl<'a> LMRPUCWorkflow<'a> {
     ) -> Result<()> {
         for (idx, st_row) in r_pindex.rows().into_iter().enumerate() {
             let (src, tgt) = (st_row[0], st_row[1]);
-            r_pucs[idx] += m_range.compute_lm_puc(src, tgt)?;
+            let rpuc = m_range.compute_lm_puc(src, tgt)?;
+            r_pucs[idx] += rpuc;
         }
         Ok(())
     }
@@ -146,14 +168,15 @@ impl<'a> LMRPUCWorkflow<'a> {
     fn run_st_ranges(
         &self,
         st_ranges: &RangePair<usize>,
-        r_samples: &Option<Vec2d<i32>>,
+        r_samples: Option<&Vec2d<i32>>,
     ) -> Result<PUCResults> {
         let r_pindex = pair_indices(st_ranges.clone());
-        let mut r_pucs = Array1::from_vec(vec![0.0f32; r_pindex.len()]);
+        let mut r_pucs = Array1::from_vec(vec![0.0f32; r_pindex.nrows()]);
         let mut m_range = MISIRangePair::<i32, f32>::new(
-            &self.args.h5ad_file,
+            &self.args.misi_data_file,
             st_ranges.clone(),
         )?;
+
         let nrounds = match r_samples {
             Some(samples_vec) => {
                 let nrounds = samples_vec.nrows();
@@ -178,7 +201,7 @@ impl<'a> LMRPUCWorkflow<'a> {
     fn run_batch(
         &self,
         bid: usize,
-        rsamples: &Option<Vec2d<i32>>,
+        rsamples: Option<&Vec2d<i32>>,
     ) -> Result<PUCResults> {
         self.run_st_ranges(
             self.wdistr
@@ -197,25 +220,45 @@ impl<'a> LMRPUCWorkflow<'a> {
             self.args.nrounds,
             self.args.nsamples,
         ) {
-            Ok(samples_vec) => Some(samples_vec),
+            Ok(samples_vec) => {
+                cond_info!(
+                    self.mpi_ifx.is_root();
+                    "Running with {:?} Samples Generated", samples_vec.shape()
+                );
+                Some(samples_vec)
+            }
             Err(err) => {
-                cond_info!(self.mpi_ifx.is_root(); "{} No Samples; Running Full PUC", err);
+                cond_info!(
+                    self.mpi_ifx.is_root();
+                    "{} No Samples; Running Full PUC", err
+                );
                 None
             }
         };
 
         let bat_results: Result<Vec<PUCResults>> = (0..nbatches)
-            .map(|bidx| self.run_batch(bidx, &rsamples))
+            .map(|bidx| self.run_batch(bidx, rsamples.as_ref()))
             .collect();
+        if any_of(bat_results.is_err(), self.mpi_ifx.comm()) {
+            if let Err(err) = bat_results {
+                return Err(err);
+            } else {
+                return Err(anyhow!(
+                    "Failed to find results in one of the procs."
+                ));
+            }
+        }
 
         match bat_results {
-            Ok(vpair_reds) => Ok(save_puc(
-                PUCResults::merge(&vpair_reds),
-                self.mpi_ifx,
-                &self.args.puc_file,
-            )?),
+            Ok(vpair_reds) => {
+                let presults = PUCResults::merge(&vpair_reds);
+                println!("Z {}", presults.len());
+                save_puc(presults, self.mpi_ifx, &self.args.puc_file)?;
+                Ok(())
+            }
             Err(err) => Err(err),
         }
+        //Ok(())
     }
 }
 

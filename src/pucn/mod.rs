@@ -7,9 +7,7 @@ pub use self::args::{RunMode, WorkflowArgs};
 use crate::{
     anndata::AnnData,
     comm::CommIfx,
-    util::{
-        BatchBlocks2D, RangePair, all_block_ranges, exc_prefix_sum, Vec2d,
-    },
+    util::{BatchBlocks2D, RangePair, Vec2d, all_block_ranges, exc_prefix_sum},
 };
 use anyhow::{Result, bail};
 use itertools::iproduct;
@@ -56,16 +54,24 @@ impl<T: Clone + Zero, S: Clone + Zero> IdVResults<T, S> {
         Self { index, val }
     }
 
+    pub fn len(&self) -> usize {
+        self.val.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.val.is_empty()
+    }
+
     pub fn merge(vpreds: &[Self]) -> Self {
-        let nsizes: Vec<usize> = vpreds.iter().map(|x| x.val.len()).collect();
-        let nstarts: Vec<usize> = exc_prefix_sum(nsizes.into_iter(), 1);
-        let ntotal: usize = vpreds.iter().map(|x| x.val.len()).sum();
+        let nsizes: Vec<usize> = vpreds.iter().map(|x| x.len()).collect();
+        let nstarts: Vec<usize> = exc_prefix_sum(nsizes.clone().into_iter(), 1);
+        let ntotal: usize = vpreds.iter().map(|x| x.len()).sum();
         let mut pindices: Array2<T> = Array2::zeros((ntotal, 2));
         let mut preds: Array1<S> = Array1::zeros(ntotal);
 
         for (idx, rstart) in nstarts.iter().enumerate() {
             let rsize = vpreds[idx].val.len();
-            let rend = rstart + rsize;
+            let rend = *rstart + rsize;
             pindices
                 .slice_mut(ndarray::s![*rstart..rend, ..])
                 .assign(&vpreds[idx].index);
@@ -156,11 +162,7 @@ pub fn collect_samples<T: Integer + Clone + FromPrimitive>(
     Ok(Vec2d::new(tsamples, nsamples, nrounds))
 }
 
-pub fn execute_workflow(
-    mpi_ifx: &CommIfx,
-    args: &WorkflowArgs,
-    adata: &AnnData,
-) -> Result<()> {
+pub fn execute_workflow(mpi_ifx: &CommIfx, args: &WorkflowArgs) -> Result<()> {
     // Compute Distributions
     let wdistr =
         WorkDistributor::new(args.nvars, args.npairs, mpi_ifx.rank, mpi_ifx.size);
@@ -184,11 +186,12 @@ pub fn execute_workflow(
                 lpuc.run()?;
             }
             RunMode::MISI => {
-                let rmisi = misiw::MISIWorkFlow{
+                let adata = AnnData::new(&args.h5ad_file, None)?;
+                let rmisi = misiw::MISIWorkFlow {
                     args,
-                    adata, 
+                    adata: &adata,
                     wdistr: &wdistr,
-                    mpi_ifx, 
+                    mpi_ifx,
                 };
                 rmisi.run()?;
             }
