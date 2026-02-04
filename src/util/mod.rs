@@ -49,11 +49,14 @@ macro_rules! map_with_result_to_tuple {
     };
 }
 
+
 #[macro_export]
 macro_rules! cond_info {
     ($cond_expr: expr; $($args:tt)* ) => {
-        if $cond_expr {
-            log::info!($($args)*)
+        if ::log::log_enabled!(::log::Level::Info) {
+          if $cond_expr {
+            ::log::info!($($args)*)
+          }
         }
     };
 }
@@ -61,8 +64,10 @@ macro_rules! cond_info {
 #[macro_export]
 macro_rules! cond_error {
     ($cond_expr: expr; $($args:tt)* ) => {
-        if $cond_expr {
-            log::error!($($args)*)
+        if ::log::log_enabled!(::log::Level::Error) {
+          if $cond_expr {
+            ::log::error!($($args)*)
+          }
         }
     };
 }
@@ -70,8 +75,10 @@ macro_rules! cond_error {
 #[macro_export]
 macro_rules! cond_debug {
     ($cond_expr: expr; $($args:tt)* ) => {
-        if $cond_expr {
-            log::debug!($($args)*)
+        if ::log::log_enabled!(::log::Level::Debug) {
+          if $cond_expr {
+            ::log::debug!($($args)*)
+          }
         }
     };
 }
@@ -79,8 +86,10 @@ macro_rules! cond_debug {
 #[macro_export]
 macro_rules! cond_warn {
     ($cond_expr: expr; $($args:tt)* ) => {
-        if $cond_expr {
-            log::warn!($($args)*)
+        if ::log::log_enabled!(::log::Level::Warn) {
+          if $cond_expr {
+            ::log::warn!($($args)*)
+          }
         }
     };
 }

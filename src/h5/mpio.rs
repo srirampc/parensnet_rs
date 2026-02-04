@@ -118,6 +118,33 @@ pub fn create_file(
         .create(fname)
 }
 
+pub fn open_file(
+    fx_comm: &CommIfx,
+    fname: &str,
+) -> Result<hdf5::File, hdf5::Error> {
+    hdf5::File::with_options()
+        .with_fapl(|fapl| {
+            fapl.mpio(fx_comm.comm().as_raw(), None)
+                .all_coll_metadata_ops(true)
+                .coll_metadata_write(true)
+        })
+        .open(fname)
+}
+
+pub fn open_file_rw(
+    fx_comm: &CommIfx,
+    fname: &str,
+) -> Result<hdf5::File, hdf5::Error> {
+    hdf5::File::with_options()
+        .with_fapl(|fapl| {
+            fapl.mpio(fx_comm.comm().as_raw(), None)
+                .all_coll_metadata_ops(true)
+                .coll_metadata_write(true)
+        })
+        .open_rw(fname)
+}
+
+
 pub fn create_write2d<T: H5Type>(
     fx_comm: &CommIfx,
     fname: &str,

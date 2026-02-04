@@ -1,14 +1,16 @@
 use anyhow::{Ok, Result};
-use mpi::traits::{Communicator, Equivalence};
+use mpi::traits::{Communicator, CommunicatorCollectives, Equivalence};
 use ndarray::{Array1, Array2, ArrayView1};
 use num::{FromPrimitive, ToPrimitive};
-use sope::{collective::allgatherv_full_vec, util::exc_prefix_sum};
+use sope::{collective::allgatherv_full_vec, cond_info, util::exc_prefix_sum};
 use std::fmt::Debug;
 
 use super::{WorkDistributor, WorkflowArgs};
 use crate::{
     anndata::AnnData,
     comm::CommIfx,
+    h5::io,
+    h5::mpio,
     hist::{bayesian_blocks_bin_edges, histogram_1d, histogram_2d},
     mvim::{
         imeasures::{
@@ -68,10 +70,10 @@ impl<IntT, FloatT> Node<IntT, FloatT> {
 }
 
 struct NodeCollection<IntT, FloatT> {
-    bin_sizes: Vec<IntT>,
-    hist_sizes: Vec<IntT>,
-    bin_starts: Vec<usize>,
-    hist_starts: Vec<usize>,
+    bin_sizes: Array1<IntT>,
+    hist_sizes: Array1<IntT>,
+    bin_starts: Array1<usize>,
+    hist_starts: Array1<usize>,
     // bins/hist flattened to a histogram
     abins: Array1<FloatT>,
     ahist: Array1<FloatT>,
@@ -110,10 +112,10 @@ impl<IntT, FloatT> NodeCollection<IntT, FloatT> {
         let ahist = Array1::from_vec(vhist);
 
         Ok(NodeCollection::<IntT, FloatT> {
-            bin_sizes,
-            hist_sizes,
-            hist_starts,
-            bin_starts,
+            bin_sizes: Array1::from_vec(bin_sizes),
+            hist_sizes: Array1::from_vec(hist_sizes),
+            hist_starts: Array1::from_vec(hist_starts),
+            bin_starts: Array1::from_vec(bin_starts),
             abins,
             ahist,
         })
@@ -216,12 +218,28 @@ impl<IntT, FloatT> NodePair<IntT, FloatT> {
 impl<'a> MISIWorkFlow<'a> {
     fn construct_nodes(&self, rank: i32) -> Result<NodeCollection<i32, f32>> {
         let columns = self.wdistr.var_dist[rank as usize].clone();
-        let rdata = self.adata.read_range_data::<f32>(columns.clone())?;
+        let rdata = self
+            .adata
+            .read_range_data_around::<f32>(columns.clone(), self.args.nroundup)?;
         let var_data: Vec<Node<i32, f32>> = columns
-            .into_iter().enumerate()
+            .into_iter()
+            .enumerate()
             .map(|(i, _cx)| Node::<i32, f32>::from_data(rdata.column(i)))
             .collect();
-        NodeCollection::<i32, f32>::from_nodes(&var_data, self.mpi_ifx.comm())
+        log::info!(
+            "At Rank {} Built {} nodes",
+            self.mpi_ifx.rank,
+            var_data.len()
+        );
+        let nodes = NodeCollection::<i32, f32>::from_nodes(
+            &var_data,
+            self.mpi_ifx.comm(),
+        )?;
+        if log::log_enabled!(log::Level::Info) {
+            self.mpi_ifx.comm().barrier();
+            cond_info!(self.mpi_ifx.is_root(); "Built {} Nodes", nodes.len());
+        }
+        Ok(nodes)
     }
 
     fn construct_batch_pairs(
@@ -232,8 +250,16 @@ impl<'a> MISIWorkFlow<'a> {
     ) -> Result<Vec<NodePair<i32, f32>>> {
         let (rows, cols) =
             self.wdistr.pairs2d.batch_ranges.at(bidx, rank as usize);
-        let row_data = self.adata.read_range_data::<f32>(rows.clone())?;
-        let col_data = self.adata.read_range_data::<f32>(cols.clone())?;
+        let (row_data, col_data) = (
+            self.adata.read_range_data_around::<f32>(
+                rows.clone(),
+                self.args.nroundup,
+            )?,
+            self.adata.read_range_data_around::<f32>(
+                cols.clone(),
+                self.args.nroundup,
+            )?,
+        );
         //let row_data = &row_data;
         let col_data = &col_data;
 
@@ -275,11 +301,39 @@ impl<'a> MISIWorkFlow<'a> {
         Ok(bat_results)
     }
 
+    fn write_nodes_h5(&self, nodes: &NodeCollection<i32, f32>) -> Result<()> {
+        let hfptr = io::create_file(&self.args.misi_data_file)?;
+        let data_group = hfptr.create_group("data")?;
+        data_group
+            .new_attr::<usize>()
+            .create("nvars")?
+            .write_scalar(&self.adata.nvars)?;
+        data_group
+            .new_attr::<usize>()
+            .create("nobs")?
+            .write_scalar(&self.adata.nobs)?;
+        data_group
+            .new_attr::<usize>()
+            .create("npairs")?
+            .write_scalar(&self.adata.npairs)?;
+        println!("X {}", nodes.hist_sizes.len());
+        io::write_1d(&data_group, "hist_dim", &nodes.hist_sizes)?;
+        io::write_1d(&data_group, "hist_start", &nodes.hist_starts)?;
+        io::write_1d(&data_group, "hist", &nodes.ahist)?;
+
+        io::write_1d(&data_group, "bins_dim", &nodes.bin_sizes)?;
+        io::write_1d(&data_group, "bins_start", &nodes.bin_starts)?;
+        io::write_1d(&data_group, "bins", &nodes.abins)?;
+        Ok(())
+    }
+
     pub fn run(&self) -> Result<()> {
         let nodes = self.construct_nodes(self.mpi_ifx.rank)?;
-        println!("Done {}", nodes.len());
         //let node_pairs = self.construct_node_pairs(self.mpi_ifx.rank, &nodes)?;
         //println!("Done {}", node_pairs.len());
+        if self.mpi_ifx.rank == 0 {
+            self.write_nodes_h5(&nodes)?;
+        }
         Ok(())
     }
 }

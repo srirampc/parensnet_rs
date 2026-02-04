@@ -131,6 +131,19 @@ impl AnnData {
         Ok(rdata)
     }
 
+    pub fn read_range_data_around<T: H5Type + Float + FromPrimitive>(
+        &self,
+        cbounds: Range<usize>,
+        n_decimals: usize,
+    ) -> Result<Array2<T>> {
+        let rdata = self.read_range_data(cbounds)?;
+        Ok(if n_decimals > 0 {
+            around(rdata.view(), n_decimals)
+        } else {
+            rdata
+        })
+    }
+
     pub fn read_submatrix<T: H5Type + Clone + Zero>(
         &self,
         indices: &[usize],

@@ -4,6 +4,10 @@ use ndarray::{Array1, Array2};
 use num::ToPrimitive;
 use std::ops::Range;
 
+pub fn create_file(fname: &str) -> Result<hdf5::File, hdf5::Error> {
+    hdf5::File::create(fname)
+}
+
 pub fn read_scalar_attr<T: H5Type>(
     group: &hdf5::Group,
     name: &str,
@@ -77,10 +81,32 @@ pub fn read1d_pair_of_points<T: Clone + H5Type, S: ToPrimitive>(
     ))
 }
 
-pub fn write_1d<T: H5Type, S: ToPrimitive>(
+pub fn write_scalar_attr<T: H5Type>(
+    group: &hdf5::Group,
+    name: &str,
+    val: &T,
+) -> Result<(), hdf5::Error> {
+    group.attr(name)?.write_scalar::<T>(val)
+}
+
+pub fn write_2d<T: H5Type>(
+    h_group: &hdf5::Group,
+    dset_name: &str,
+    data: &Array2<T>,
+) -> Result<(), hdf5::Error> {
+    h_group
+        .new_dataset_builder()
+        .empty::<T>()
+        .shape(hdf5::Extents::from([data.nrows(), data.ncols()]))
+        .create(dset_name)?
+        .as_writer()
+        .write(data)
+}
+
+pub fn write_1d<T: H5Type>(
     h_group: &hdf5::Group,
     dsname: &str,
-    data: &ndarray::Array1<T>,
+    data: &Array1<T>,
 ) -> Result<(), hdf5::Error> {
     let n_data = data.len();
     h_group
