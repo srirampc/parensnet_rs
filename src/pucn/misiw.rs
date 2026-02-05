@@ -10,7 +10,6 @@ use crate::{
     anndata::AnnData,
     comm::CommIfx,
     h5::io,
-    h5::mpio,
     hist::{bayesian_blocks_bin_edges, histogram_1d, histogram_2d},
     mvim::{
         imeasures::{
@@ -248,8 +247,7 @@ impl<'a> MISIWorkFlow<'a> {
         bidx: usize,
         nodes: &NodeCollection<i32, f32>,
     ) -> Result<Vec<NodePair<i32, f32>>> {
-        let (rows, cols) =
-            self.wdistr.pairs2d.batch_ranges.at(bidx, rank as usize);
+        let (rows, cols) = self.wdistr.pairs_2d().batch_range(bidx, rank);
         let (row_data, col_data) = (
             self.adata.read_range_data_around::<f32>(
                 rows.clone(),
@@ -260,8 +258,7 @@ impl<'a> MISIWorkFlow<'a> {
                 self.args.nroundup,
             )?,
         );
-        //let row_data = &row_data;
-        let col_data = &col_data;
+        let r_col_data = &col_data;
 
         let node_pairs = rows
             .clone()
@@ -270,7 +267,7 @@ impl<'a> MISIWorkFlow<'a> {
                 let r_data = row_data.column(i);
                 cols.clone().enumerate().flat_map(move |(j, cx)| {
                     if i < j {
-                        let c_data = col_data.column(j);
+                        let c_data = r_col_data.column(j);
                         let npair = NodePair::<i32, f32>::from_node_collection(
                             nodes,
                             (rx, cx),
@@ -292,7 +289,7 @@ impl<'a> MISIWorkFlow<'a> {
         rank: i32,
         nodes: &NodeCollection<i32, f32>,
     ) -> Result<Vec<NodePair<i32, f32>>> {
-        let nbatches = self.wdistr.pairs2d.n_batches;
+        let nbatches = self.wdistr.pairs_2d().num_batches();
         let mut bat_results: Vec<NodePair<i32, f32>> = Vec::new();
         for bidx in 0..nbatches {
             bat_results.extend(self.construct_batch_pairs(rank, bidx, nodes)?);
@@ -316,7 +313,6 @@ impl<'a> MISIWorkFlow<'a> {
             .new_attr::<usize>()
             .create("npairs")?
             .write_scalar(&self.adata.npairs)?;
-        println!("X {}", nodes.hist_sizes.len());
         io::write_1d(&data_group, "hist_dim", &nodes.hist_sizes)?;
         io::write_1d(&data_group, "hist_start", &nodes.hist_starts)?;
         io::write_1d(&data_group, "hist", &nodes.ahist)?;

@@ -7,7 +7,10 @@ pub use self::args::{RunMode, WorkflowArgs};
 use crate::{
     anndata::AnnData,
     comm::CommIfx,
-    util::{BatchBlocks2D, RangePair, Vec2d, all_block_ranges, exc_prefix_sum},
+    util::{
+        BatchBlocks2D, EBBlocks2D, RangePair, Vec2d, all_block_ranges,
+        exc_prefix_sum,
+    },
 };
 use anyhow::{Result, bail};
 use itertools::iproduct;
@@ -29,7 +32,7 @@ pub struct WorkDistributor {
     size: i32,
     var_dist: Vec<Range<usize>>,
     pairs1d_dist: Vec<Range<usize>>,
-    pairs2d: BatchBlocks2D,
+    pairs2d: EBBlocks2D,
 }
 
 impl WorkDistributor {
@@ -39,8 +42,30 @@ impl WorkDistributor {
             size,
             var_dist: all_block_ranges(size, nvars),
             pairs1d_dist: all_block_ranges(size, npairs),
-            pairs2d: BatchBlocks2D::new(nvars, size as usize),
+            pairs2d: EBBlocks2D::new_diag(nvars, size as usize),
         }
+    }
+
+    pub fn new_seq(nvars: usize, npairs: usize, rank: i32, size: i32) -> Self {
+        WorkDistributor {
+            rank,
+            size,
+            var_dist: all_block_ranges(size, nvars),
+            pairs1d_dist: all_block_ranges(size, npairs),
+            pairs2d: EBBlocks2D::new_seq(nvars, size as usize),
+        }
+    }
+
+    pub fn pairs_2d(&self) -> &dyn BatchBlocks2D {
+        self.pairs2d.trait_ref()
+    }
+
+    pub fn pairs_1d(&self) -> &[Range<usize>] {
+        &self.pairs1d_dist
+    }
+
+    pub fn vars_dist(&self) -> &[Range<usize>] {
+        &self.var_dist
     }
 }
 

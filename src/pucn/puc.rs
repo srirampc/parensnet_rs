@@ -98,16 +98,13 @@ impl<'a> SampledPUCWorkflow<'a> {
         rsamples: Option<&Vec2d<i32>>,
     ) -> Result<PUCResults> {
         self.run_st_ranges(
-            self.wdistr
-                .pairs2d
-                .batch_ranges
-                .at(bid, self.mpi_ifx.rank as usize),
+            self.wdistr.pairs_2d().batch_range(bid, self.mpi_ifx.rank),
             rsamples,
         )
     }
 
     pub fn run(&self) -> Result<()> {
-        let nbatches = self.wdistr.pairs2d.n_batches;
+        let nbatches = self.wdistr.pairs_2d().num_batches();
         // allow for samples being none
         let rsamples = match collect_samples::<i32>(
             self.mpi_ifx,
@@ -204,16 +201,13 @@ impl<'a> LMRPUCWorkflow<'a> {
         rsamples: Option<&Vec2d<i32>>,
     ) -> Result<PUCResults> {
         self.run_st_ranges(
-            self.wdistr
-                .pairs2d
-                .batch_ranges
-                .at(bid, self.mpi_ifx.rank as usize),
+            self.wdistr.pairs_2d().batch_range(bid, self.mpi_ifx.rank),
             rsamples,
         )
     }
 
     pub fn run(&self) -> Result<()> {
-        let nbatches = self.wdistr.pairs2d.n_batches;
+        let nbatches = self.wdistr.pairs_2d().num_batches();
         let rsamples = match collect_samples::<i32>(
             self.mpi_ifx,
             self.args.nvars,

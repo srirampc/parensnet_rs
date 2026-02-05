@@ -49,7 +49,6 @@ macro_rules! map_with_result_to_tuple {
     };
 }
 
-
 #[macro_export]
 macro_rules! cond_info {
     ($cond_expr: expr; $($args:tt)* ) => {
@@ -145,11 +144,26 @@ pub fn read_file_to_string(input_file: &str) -> Result<String, Error> {
     })
 }
 
+pub fn top_half_range<T: Integer + Copy + FromPrimitive>(
+    inr: &Range<T>,
+) -> Range<T> {
+    let range_mid = (inr.end - inr.start) / (T::one() + T::one());
+    inr.start..inr.start + range_mid
+}
+
+pub fn bottom_half_range<T: Integer + Copy + FromPrimitive>(
+    inr: &Range<T>,
+) -> Range<T> {
+    let range_mid = (inr.end - inr.start) / (T::one() + T::one());
+    inr.start + range_mid..inr.end
+}
+
 pub fn halve_range<T: Integer + Copy + FromPrimitive>(
     inr: &Range<T>,
 ) -> RangePair<T> {
     let range_mid = (inr.end - inr.start) / (T::one() + T::one());
-    (inr.start..range_mid, range_mid..inr.end)
+    let inr_mid = inr.start + range_mid;
+    (inr.start..inr_mid, inr_mid..inr.end)
 }
 
 pub fn half_split_ranges<T: Integer + Copy + FromPrimitive>(
@@ -314,11 +328,42 @@ pub fn all_block_ranges_2d(p: i32, n: usize) -> Vec2d<RangePair<usize>> {
 /// Returns the all the upper triangular blocks of a pair-wise distribution of n data points.
 /// Includes all pairs (i, j) for i in 0..n and j in 0..n
 /// Pairs are distributed in p x p blocks with each block size of n/p x n/p
+/// Returns a tuple for sparse representation:
+/// (flat vector of all block ranges, counts for each row)
 ///
-pub fn triu_block_ranges_2d(p: i32, n: usize) -> Vec<Vec<RangePair<usize>>> {
-    (0..p)
-        .map(|i| (i..p).map(|j| block_range_2d(i, j, p, n)).collect())
-        .collect()
+pub fn triu_block_ranges_2d(
+    p: i32,
+    n: usize,
+) -> (Vec<RangePair<usize>>, Vec<usize>) {
+    (
+        (0..p)
+            .flat_map(|i| (i..p).map(move |j| block_range_2d(i, j, p, n)))
+            .collect(),
+        (1..(p as usize + 1)).rev().collect(),
+    )
+}
+
+///
+/// Returns the all the upper triangular blocks of a pair-wise distribution of n data points.
+/// Includes all pairs (i, j) for i in 0..n and j in 0..n
+/// Pairs are distributed in p x p blocks with each block size of n/p x n/p
+/// Returns a tuple for sparse representation:
+/// (flat vector of all block ranges, counts for each row)
+///
+pub fn triu_block_ranges_2d_no_diag(
+    p: i32,
+    n: usize,
+) -> (Vec<RangePair<usize>>, Vec<usize>) {
+    (
+        (0..p)
+            .flat_map(|i| (i + 1..p).map(move |j| block_range_2d(i, j, p, n)))
+            .collect(),
+        (1..p as usize).rev().collect(),
+    )
+}
+
+pub fn diag_block_ranges(p: i32, n: usize) -> Vec<RangePair<usize>> {
+    (0..p).map(|j| block_range_2d(j, j, p, n)).collect()
 }
 
 ///
@@ -356,16 +401,36 @@ pub fn diag_batch_distribution(p: usize) -> Vec2d<(usize, usize)> {
     )
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct BatchBlocks2D {
-    pub n: usize,
-    pub blocks: Vec2d<RangePair<usize>>, // p x p blocks with each one of size n/p x n/p
-    pub batches: Vec2d<(usize, usize)>, // bp x p, row i blocks assigned for the batch
-    pub batch_ranges: Vec2d<RangePair<usize>>,
-    pub n_batches: usize,
+pub trait BatchBlocks2D {
+    fn dim(&self) -> usize;
+    fn num_batches(&self) -> usize;
+    fn batch_range(&self, bidx: usize, rank: i32) -> &RangePair<usize>;
 }
 
-impl BatchBlocks2D {
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DiagBatchBlocks2D {
+    n: usize,
+    blocks: Vec2d<RangePair<usize>>, // p x p blocks with each one of size n/p x n/p
+    batches: Vec2d<(usize, usize)>, // bp x p, row i blocks assigned for the batch
+    batch_ranges: Vec2d<RangePair<usize>>,
+    n_batches: usize,
+}
+
+impl BatchBlocks2D for DiagBatchBlocks2D {
+    fn dim(&self) -> usize {
+        self.n
+    }
+
+    fn num_batches(&self) -> usize {
+        self.n_batches
+    }
+
+    fn batch_range(&self, bidx: usize, rank: i32) -> &RangePair<usize> {
+        self.batch_ranges.at(bidx, rank as usize)
+    }
+}
+
+impl DiagBatchBlocks2D {
     pub fn new(n: usize, p: usize) -> Self {
         let blocks = all_block_ranges_2d(p as i32, n);
         let batches = diag_batch_distribution(p);
@@ -389,12 +454,110 @@ impl BatchBlocks2D {
             .collect();
         let batch_ranges = Vec2d::new(vbr, n_batches, p);
 
-        BatchBlocks2D {
+        DiagBatchBlocks2D {
             n,
             blocks,
             batches,
             batch_ranges,
             n_batches,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SeqBatchBlocks2D {
+    n: usize,
+    blocks: (Vec<RangePair<usize>>, Vec<usize>), // p x p upper triangular (not including daigonal)
+    diag_blocks: Vec<RangePair<usize>>,
+    batch_ranges: Vec2d<RangePair<usize>>, // p x bp
+    n_batches: usize,
+}
+
+impl SeqBatchBlocks2D {
+    pub fn new(n: usize, p: usize) -> Self {
+        let blocks = triu_block_ranges_2d_no_diag(p as i32, n);
+        let diag_blocks = diag_block_ranges(p as i32, n);
+        let n_batches = 1 + (p / 2);
+        let n_odbz = n_batches - 1; // off diagonal batches
+        let bvr: Vec<RangePair<usize>> = if p.is_multiple_of(2) {
+            assert!(blocks.0.len().is_multiple_of(p / 2));
+            assert!(n_odbz == (blocks.0.len() / (p - 1)));
+            (0..p)
+                .flat_map(|i| {
+                    let bstart = i * n_odbz - i.div_ceil(2);
+                    let bend = bstart + n_odbz;
+                    let mut rvec = blocks.0[bstart..bend].to_vec();
+                    if i.is_even() {
+                        rvec[n_odbz - 1] = (
+                            top_half_range(&rvec[n_odbz - 1].0),
+                            rvec[n_odbz - 1].1.clone(),
+                        );
+                    }
+                    if i.is_odd() {
+                        rvec[0] =
+                            (bottom_half_range(&rvec[0].0), rvec[0].1.clone())
+                    }
+                    rvec.insert(0, diag_blocks[i].clone());
+                    rvec.into_iter()
+                })
+                .collect()
+        } else {
+            assert!(blocks.0.len().is_multiple_of(p));
+            (0..p)
+                .flat_map(|i| {
+                    let (bstart, bend) = (i * n_odbz, (i + 1) * n_odbz);
+                    let mut rvec = blocks.0[bstart..bend].to_vec();
+                    rvec.insert(0, diag_blocks[i].clone());
+                    rvec.into_iter()
+                })
+                .collect()
+        };
+        let batch_ranges = Vec2d::new(bvr, p, n_batches);
+
+        Self {
+            n,
+            blocks,
+            diag_blocks,
+            batch_ranges,
+            n_batches,
+        }
+    }
+}
+
+impl BatchBlocks2D for SeqBatchBlocks2D {
+    fn dim(&self) -> usize {
+        self.n
+    }
+
+    fn num_batches(&self) -> usize {
+        self.n_batches
+    }
+
+    fn batch_range(&self, bidx: usize, rank: i32) -> &RangePair<usize> {
+        // batch_ranges is stored as p x n_batches 2d matrix
+        self.batch_ranges.at(rank as usize, bidx)
+    }
+}
+
+#[derive(Debug)]
+pub enum EBBlocks2D {
+    Diag(DiagBatchBlocks2D),
+    Seq(SeqBatchBlocks2D),
+}
+
+impl EBBlocks2D {
+    pub fn new_diag(n: usize, p: usize) -> Self {
+        Self::Diag(DiagBatchBlocks2D::new(n, p))
+    }
+
+    pub fn new_seq(n: usize, p: usize) -> Self {
+        Self::Seq(SeqBatchBlocks2D::new(n, p))
+    }
+
+    pub fn trait_ref(&self) -> &dyn BatchBlocks2D {
+        match self {
+            Self::Diag(diag_b) => diag_b,
+            Self::Seq(seq_b) => seq_b,
         }
     }
 }
@@ -454,8 +617,10 @@ where
 
 #[cfg(test)]
 mod tests {
+    use log::{debug, info};
     use ndarray::Array1;
-    use log::{info, debug};
+
+    use crate::util::{BatchBlocks2D, RangePair, SeqBatchBlocks2D};
     #[test]
     pub fn test_around() {
         use super::around;
@@ -539,5 +704,23 @@ mod tests {
         debug!("  -> sorted {:?}", Array1::from_vec(srt_data2));
         debug!("  -> values {:?}", Array1::from_vec(result2.values));
         debug!("  -> counts {:?}", Array1::from_vec(result2.counts));
+    }
+
+    #[test]
+    fn test_seq_blocks2d() {
+        crate::tests::log_init();
+        let np: usize = 8;
+        let sb = SeqBatchBlocks2D::new(500, np);
+
+        debug!("SB {} SBL {:?}", sb.blocks.0.len(), sb.blocks.0);
+
+        for rank in 0..np {
+            let rvec = (0..sb.n_batches)
+                .map(|bx| sb.batch_range(bx, rank as i32))
+                .cloned()
+                .collect::<Vec<RangePair<usize>>>();
+            let rvec = rvec[..rvec.len() - 1].to_vec();
+            debug!(" {} {:?}", rank, rvec,);
+        }
     }
 }

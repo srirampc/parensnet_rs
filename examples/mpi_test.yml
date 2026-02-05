@@ -4,3 +4,5 @@ hdf_out2: "tmp/test_write2.h5"
 nsamples: 4
 nrounds: 6
 nvars: 500
+tests:
+  - pair_dist
