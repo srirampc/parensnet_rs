@@ -26,7 +26,7 @@ polars = "0.52.0"
 rand = "0.9.2"
 serde = { version = "1.0.228", features = ["derive", "std"] }
 serde_json = "1.0"
-serde-saphyr = "0.0.17"
+serde-saphyr = "0.0.18"
 sope = { path = "ext/sope" }
 thiserror = "2.0.18"
 

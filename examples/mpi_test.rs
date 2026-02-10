@@ -5,14 +5,18 @@ use ndarray::{Array1, Array2};
 use parensnet_rs::{
     comm::CommIfx,
     cond_error, cond_info, cond_println,
-    h5::mpio::{
-        block_read1d, block_read2d, block_write1d, block_write2d, create_file,
-        create_write2d,
+    h5::{
+        io::read_scalar_attr,
+        mpio::{
+            block_read1d, block_read2d, block_write1d, block_write2d,
+            create_file, create_write2d,
+        },
     },
     pucn::{WorkDistributor, collect_samples, generate_samples},
-    util::{BatchBlocks2D, Vec2d, block_owner, triu_pair_to_index},
+    util::{Vec2d, block_owner, exc_prefix_sum, triu_pair_to_index},
 };
 use serde::{Deserialize, Serialize};
+use std::iter::zip;
 
 /// Parensnet:: Parallel Ensembl Gene Network Construction
 #[derive(Parser, Debug)]
@@ -39,6 +43,7 @@ pub struct InArgs {
     pub hdf_in: String,
     pub hdf_out: String,
     pub hdf_out2: String,
+    pub misi_file: String,
     pub nsamples: usize,
     pub nvars: usize,
     pub nrounds: usize,
@@ -133,8 +138,10 @@ fn test_blocks_2d(
     mcx: &CommIfx,
     nvars: usize,
     npairs: usize,
-    blocks2d: &dyn BatchBlocks2D,
+    hist_dim: &Array1<usize>,
+    wdistr: WorkDistributor,
 ) -> Result<()> {
+    let blocks2d = wdistr.pairs_2d();
     let nbatches = blocks2d.num_batches();
     let mut pairs: Vec<(usize, usize, usize)> = (0..nbatches)
         .flat_map(|bidx| {
@@ -153,54 +160,139 @@ fn test_blocks_2d(
         .collect();
     pairs.sort();
 
-    //let pindices: Vec<usize> = pairs.iter().map(|x| x.0).collect();
     let mut p_ranks: Vec<i32> = pairs
         .iter()
         .map(|x| block_owner(x.0, mcx.size, npairs))
         .collect();
-    let prtest: bool = p_ranks.is_sorted();
+    let is_ranks_sorted: bool = p_ranks.is_sorted();
     p_ranks.dedup();
 
-    let mut rcounts: Vec<usize> = vec![0usize; mcx.size as usize];
-    for (idx, _x, _y) in pairs.iter() {
-        let p_own = block_owner(*idx, mcx.size, npairs);
-        rcounts[p_own as usize] += 1;
-    }
-    let to_send: usize = rcounts
+    let np = mcx.size as usize;
+    let nsi: usize = hist_dim.iter().sum::<usize>() * nvars;
+    let nord_pairs: usize = nvars * nvars;
+    let si_starts: Vec<usize> = exc_prefix_sum(hist_dim.iter().cloned(), nvars);
+    let (snd_pairs, snd_tabs, snd_si0, snd_si1, snd_ord) = pairs.iter().fold(
+        (
+            vec![0usize; np],
+            vec![0usize; np],
+            vec![0usize; np],
+            vec![0usize; np],
+            vec![0usize; np],
+        ),
+        |mut vx, idx| {
+            let p_own = block_owner(idx.0, mcx.size, npairs);
+            vx.0[p_own as usize] += 1;
+            vx.1[p_own as usize] += hist_dim[idx.1] * hist_dim[idx.2];
+            let rdx = si_starts[idx.1] + (idx.2 * hist_dim[idx.1]);
+            let p_own = block_owner(rdx, mcx.size, nsi);
+            vx.2[p_own as usize] += hist_dim[idx.1];
+            let sdx = si_starts[idx.2] + (idx.1 * hist_dim[idx.2]);
+            let p_own = block_owner(sdx, mcx.size, nsi);
+            vx.3[p_own as usize] += hist_dim[idx.2];
+            let rdx = (idx.1 * nvars) + idx.2;
+            assert!(rdx < nord_pairs);
+            let p_own = block_owner(rdx, mcx.size, nord_pairs);
+            vx.4[p_own as usize] += hist_dim[idx.1];
+            let sdx = (idx.2 * nvars) + idx.1;
+            let p_own = block_owner(sdx, mcx.size, nord_pairs);
+            vx.4[p_own as usize] += hist_dim[idx.2];
+            vx
+        },
+    );
+
+    //assert_eq!(rcounts, frcounts);
+    let (to_snd_pairs, to_snd_tabs, to_snd_s0, to_snd_s1) =
+        zip(snd_pairs.iter(), snd_tabs.iter())
+            .zip(zip(snd_si0.iter(), snd_si1.iter()))
+            .enumerate()
+            .map(|(i, ((x, y), (s0, s1)))| {
+                if i != mcx.rank as usize {
+                    (*x, *y, *s0, *s1)
+                } else {
+                    (0, 0, 0, 0)
+                }
+            })
+            .fold(
+                (0usize, 0usize, 0usize, 0usize),
+                |(acc_x, acc_y, acc_s0, acc_s1), (x, y, s0, s1)| {
+                    (acc_x + x, acc_y + y, acc_s0 + s0, acc_s1 + s1)
+                },
+            );
+    let to_snd_ord_pairs = snd_ord
         .iter()
         .enumerate()
-        .map(|(i, x)| if i != mcx.rank as usize { *x } else { 0 })
-        .sum();
+        .map(|(i, x)| if i != mcx.rank as usize { *x } else { 0usize })
+        .sum::<usize>();
 
-    let nred_total = sope::reduction::allreduce_sum(&(pairs.len()), mcx.comm());
+    let total_pairs = sope::reduction::allreduce_sum(&(pairs.len()), mcx.comm());
+    let tabs_size: usize = snd_tabs.iter().sum();
+    let total_tabs = sope::reduction::allreduce_sum(&(tabs_size), mcx.comm());
+    let s0_size: usize = snd_si0.iter().sum();
+    let total_s0 = sope::reduction::allreduce_sum(&(s0_size), mcx.comm());
+    let s1_size: usize = snd_si1.iter().sum();
+    let total_s1 = sope::reduction::allreduce_sum(&(s1_size), mcx.comm());
+    let ord_snd_size: usize = snd_ord.iter().sum();
+    let total_ord = sope::reduction::allreduce_sum(&ord_snd_size, mcx.comm());
     sope::gather_println!(
         mcx.comm();
-        "({} {} {}) ({} {} {} {:.2}): : C[{:?}] K[{:?}] ",
+        "({} {} {} {})::({} {} {:.2}):: ({} {} {:.2})::  ({} {} {:.2}) :: ({} {} {:.2})::({} {} {:.2}) ",
         npairs,
         blocks2d.num_batches(),
         pairs.len(),
-        prtest,
-        nred_total,
-        to_send,
-        to_send as f64/pairs.len() as f64,
-        rcounts,
-        p_ranks,
+        is_ranks_sorted,
+        total_pairs,
+        to_snd_pairs,
+        to_snd_pairs as f64/pairs.len() as f64,
+        total_tabs,
+        to_snd_tabs,
+        to_snd_tabs as f64/total_tabs as f64,
+        total_s0,
+        to_snd_s0,
+        to_snd_s0 as f64/total_s0 as f64,
+        total_s1,
+        to_snd_s1,
+        to_snd_s1 as f64/total_s1 as f64,
+        total_ord,
+        ord_snd_size,
+        ord_snd_size as f64/total_ord as f64,
     );
 
+    sope::gather_println!(
+        mcx.comm();
+        "C[{:?}] K[{:?}]",
+        snd_pairs,
+        p_ranks,
+    );
     Ok(())
 }
 
 fn test_pair_dist(mcx: &CommIfx, args: &InArgs) -> Result<()> {
-    let nvars = args.nvars;
-    let npairs = (nvars * (nvars - 1)) / 2;
-    let wdistr = WorkDistributor::new(nvars, npairs, mcx.rank, mcx.size);
-    let blocks2d = wdistr.pairs_2d();
-    test_blocks_2d(mcx, nvars, npairs, blocks2d)?;
+    let file = hdf5::File::open(&args.misi_file)?;
+    let data_g = file.group("data")?;
+    // attributes
+    let nvars = read_scalar_attr::<i64>(&data_g, "nvars")? as usize;
+    let npairs = read_scalar_attr::<i64>(&data_g, "npairs")? as usize;
+    let hist_dim: Array1<usize> = data_g
+        .dataset("hist_dim")?
+        .read_1d::<i32>()?
+        .map(|x| *x as usize);
+    cond_info!(mcx.is_root(); "NVARS, NPAIRS [{} {}]", nvars, npairs);
+    test_blocks_2d(
+        mcx,
+        nvars,
+        npairs,
+        &hist_dim,
+        WorkDistributor::new(nvars, npairs, mcx.rank, mcx.size),
+    )?;
     mcx.comm().barrier();
-    cond_println!(mcx.is_root(); "--");
-    let wdistr = WorkDistributor::new_seq(nvars, npairs, mcx.rank, mcx.size);
-    let blocks2d = wdistr.pairs_2d();
-    test_blocks_2d(mcx, nvars, npairs, blocks2d)?;
+    cond_info!(mcx.is_root(); "--");
+    test_blocks_2d(
+        mcx,
+        nvars,
+        npairs,
+        &hist_dim,
+        WorkDistributor::new_seq(nvars, npairs, mcx.rank, mcx.size),
+    )?;
     Ok(())
 }
 
@@ -229,6 +321,7 @@ fn run(mcx: &CommIfx, args: CLIArgs) -> Result<()> {
 
 fn main() {
     let comm_ifx = CommIfx::init();
+    env_logger::init();
     match CLIArgs::try_parse() {
         Ok(args) => {
             let _ = run(&comm_ifx, args);

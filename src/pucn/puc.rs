@@ -50,7 +50,7 @@ impl<'a> SampledPUCWorkflow<'a> {
         &self,
         st_row: ArrayView1<i32>,
         r_samples: &Vec2d<i32>,
-        m_range: &MISIRangePair<i32, f32>,
+        m_range: &MISIRangePair<i64, i32, f32>,
     ) -> Result<f32, RVError> {
         let mut avg_red: f32 = 0.0;
         let (src, tgt) = (st_row[0], st_row[1]);
@@ -72,7 +72,7 @@ impl<'a> SampledPUCWorkflow<'a> {
         st_ranges: &RangePair<usize>,
         r_samples: Option<&Vec2d<i32>>,
     ) -> Result<PUCResults> {
-        let m_range = MISIRangePair::<i32, f32>::new(
+        let m_range = MISIRangePair::<i64, i32, f32>::new(
             &self.args.misi_data_file,
             st_ranges.clone(),
         )?;
@@ -150,7 +150,7 @@ pub struct LMRPUCWorkflow<'a> {
 impl<'a> LMRPUCWorkflow<'a> {
     fn run_with_misi_range(
         &self,
-        m_range: &MISIRangePair<i32, f32>,
+        m_range: &MISIRangePair<i64, i32, f32>,
         r_pindex: &Array2<i32>,
         r_pucs: &mut Array1<f32>,
     ) -> Result<()> {
@@ -169,7 +169,7 @@ impl<'a> LMRPUCWorkflow<'a> {
     ) -> Result<PUCResults> {
         let r_pindex = pair_indices(st_ranges.clone());
         let mut r_pucs = Array1::from_vec(vec![0.0f32; r_pindex.nrows()]);
-        let mut m_range = MISIRangePair::<i32, f32>::new(
+        let mut m_range = MISIRangePair::<i64, i32, f32>::new(
             &self.args.misi_data_file,
             st_ranges.clone(),
         )?;

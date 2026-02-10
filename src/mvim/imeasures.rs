@@ -1,8 +1,13 @@
 use ndarray::{Array, Array1, Array2, ArrayView, ArrayView1, ArrayView2, Axis};
+use num::traits::float::TotalOrder;
 use num::{Float, FromPrimitive};
+use std::fmt::Debug;
 
 use crate::hist::bb_joint_histogram;
-use crate::types::{AssignOps, DbgDisplay, LogBase, OrderedFloat};
+use crate::types::{AssignOps, LogBase};
+
+pub trait IMFloat: Float + AssignOps + FromPrimitive + Debug + Clone {}
+impl<T: Float + AssignOps + FromPrimitive + Debug + Clone> IMFloat for T {}
 
 pub fn log_function<T: Float>(tbase: LogBase) -> impl Fn(T) -> T {
     match tbase {
@@ -62,7 +67,7 @@ pub fn mi_from_tab<T>(
     opt_weight: Option<T>,
 ) -> T
 where
-    T: 'static + Float + AssignOps + Clone + DbgDisplay,
+    T: 'static + IMFloat,
 {
     let tweight = opt_weight.unwrap_or(x_tab.sum());
     let mut mi_prod = log_jvi_ratio(xy_tab, x_tab, y_tab, tbase, tweight);
@@ -79,7 +84,7 @@ pub fn mi_from_ljvi<T>(
     opt_weight: Option<T>,
 ) -> T
 where
-    T: 'static + Float + AssignOps + Clone + DbgDisplay,
+    T: 'static + IMFloat,
 {
     let tweight = opt_weight.unwrap_or(xy_tab.sum());
 
@@ -99,7 +104,7 @@ pub fn mi_from_data_with_bb<T>(
     tbase: LogBase,
 ) -> T
 where
-    T: 'static + OrderedFloat + FromPrimitive + AssignOps + Clone + DbgDisplay,
+    T: 'static + IMFloat + TotalOrder,
 {
     let (xy_tab, x_tab, y_tab) = bb_joint_histogram(x_data, y_data);
     mi_from_tab(
@@ -121,7 +126,7 @@ pub fn si_from_ljvi<T>(
     y_tab: ArrayView1<T>,
 ) -> (Array1<T>, Array1<T>)
 where
-    T: 'static + Float + AssignOps + Clone + DbgDisplay,
+    T: 'static + IMFloat,
 {
     let xy_shape = (x_tab.len(), y_tab.len());
     let x_ratio = Array2::from_shape_fn(xy_shape, |(i, j)| {
@@ -159,7 +164,7 @@ pub fn si_from_tab<T>(
     opt_weight: Option<T>,
 ) -> (Array1<T>, Array1<T>)
 where
-    T: 'static + Float + AssignOps + Clone + DbgDisplay,
+    T: 'static + IMFloat,
 {
     let tweight = opt_weight.unwrap_or(x_tab.sum());
     let ljvi_ratio = log_jvi_ratio(xy_tab, x_tab, y_tab, tbase, tweight);
@@ -173,7 +178,7 @@ pub fn redundancy<T>(
     opt_weight: Option<T>,
 ) -> T
 where
-    T: 'static + Float + AssignOps + Clone + DbgDisplay,
+    T: 'static + IMFloat,
 {
     let tfactor: T = match opt_weight {
         Some(wt) => T::one() / wt,
@@ -191,7 +196,7 @@ pub fn lmr_about_x_from_lvji<T>(
     opt_weight: Option<T>,
 ) -> Array1<T>
 where
-    T: 'static + Float + AssignOps + Clone + DbgDisplay,
+    T: 'static + IMFloat,
 {
     assert_eq!(ljvi_ratio.dim(), xy_tab.dim());
     //   tfactor = 1.0/(np.sum(xytab) if tweight is None else tweight)
@@ -210,7 +215,7 @@ pub fn lmr_about_y_from_lvji<T>(
     opt_weight: Option<T>,
 ) -> Array1<T>
 where
-    T: 'static + Float + AssignOps + Clone + DbgDisplay,
+    T: 'static + IMFloat,
 {
     assert_eq!(ljvi_ratio.dim(), xy_tab.dim());
     //   tfactor = 1.0/(np.sum(xytab) if tweight is None else tweight)
@@ -228,7 +233,7 @@ pub fn lmr_from_lvji<T>(
     opt_weight: Option<T>,
 ) -> (Array1<T>, Array1<T>)
 where
-    T: 'static + Float + AssignOps + Clone + DbgDisplay,
+    T: 'static + IMFloat,
 {
     assert_eq!(ljvi_ratio.dim(), xy_tab.dim());
     //   tfactor = 1.0/(np.sum(xytab) if tweight is None else tweight)
@@ -248,7 +253,7 @@ pub fn lmr_from_histogram<T>(
     opt_weight: Option<T>,
 ) -> (Array1<T>, Array1<T>)
 where
-    T: 'static + Float + AssignOps + Clone + DbgDisplay,
+    T: 'static + IMFloat,
 {
     let (xsize, ysize) = xy_tab.dim();
     assert_eq!((xsize, ysize), (x_tab.len(), y_tab.len()));

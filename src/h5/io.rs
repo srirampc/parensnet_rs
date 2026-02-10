@@ -15,6 +15,13 @@ pub fn read_scalar_attr<T: H5Type>(
     group.attr(name)?.read_scalar::<T>()
 }
 
+pub fn read_1d<T: H5Type>(
+    fname: &str,
+    dset_name: &str,
+) -> Result<Array1<T>, hdf5::Error> {
+    hdf5::File::open(fname)?.dataset(dset_name)?.read_1d()
+}
+
 pub fn read_2d<T: H5Type>(
     fname: &str,
     dset_name: &str,

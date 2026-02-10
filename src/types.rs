@@ -1,23 +1,19 @@
 #![allow(dead_code)]
 
-use num::traits::float::TotalOrder;
-use num::{Float, FromPrimitive, Integer, One, ToPrimitive, Zero};
+use num::{
+    traits::float::TotalOrder,
+    {Float, FromPrimitive, Integer, One, ToPrimitive, Zero},
+};
 use serde::{Deserialize, Serialize};
-use std::fmt::{Debug, Display};
-use std::marker::Sized;
-use std::ops::{AddAssign, MulAssign, SubAssign};
-
-pub trait DbgDisplay: Debug + Display {}
-impl<T: Debug + Display> DbgDisplay for T {}
+use std::{
+    fmt::Debug,
+    hash::Hash,
+    marker::Sized,
+    ops::{AddAssign, MulAssign, SubAssign},
+};
 
 pub trait AddFromZero: Zero + One + AddAssign {}
 impl<T: Zero + One + AddAssign> AddFromZero for T {}
-
-pub trait OrderedFloat: Float + TotalOrder {}
-impl<T: Float + TotalOrder> OrderedFloat for T {}
-
-pub trait OrderedInt: Integer + PartialOrd {}
-impl<T: Integer + PartialOrd> OrderedInt for T {}
 
 pub trait AssignOps: Sized + AddAssign + MulAssign + SubAssign {}
 impl<T: Sized + AddAssign + MulAssign + SubAssign> AssignOps for T {}
@@ -25,8 +21,31 @@ impl<T: Sized + AddAssign + MulAssign + SubAssign> AssignOps for T {}
 pub trait FromToPrimitive: FromPrimitive + ToPrimitive {}
 impl<T: FromPrimitive + ToPrimitive> FromToPrimitive for T {}
 
-pub trait CCDbgDisplay: Clone + Copy + Debug + Display {}
-impl<T: Clone + Copy + Debug + Display> CCDbgDisplay for T {}
+pub trait PNInteger:
+    Integer + Copy + Clone + Debug + Hash + PartialOrd + FromToPrimitive + AssignOps
+{
+}
+impl<
+    T: Integer
+        + Copy
+        + Clone
+        + Debug
+        + Hash
+        + PartialOrd
+        + FromToPrimitive
+        + AssignOps,
+> PNInteger for T
+{
+}
+
+pub trait PNFloat:
+    Float + Debug + Clone + TotalOrder + FromToPrimitive + AssignOps
+{
+}
+impl<T: Float + Debug + Clone + TotalOrder + FromToPrimitive + AssignOps> PNFloat
+    for T
+{
+}
 
 #[derive(Clone, Serialize, Deserialize, Debug, Default, PartialEq)]
 pub enum LogBase {

@@ -1,4 +1,5 @@
 hdf_in: "data/adata.20k.500.H100.par_puc.h5"
+misi_file: "/localscratch/schockalingam6/tmp/pbmc20k.500/adata.20k.500.misidata.h5"
 hdf_out: "tmp/test_write.h5"
 hdf_out2: "tmp/test_write2.h5"
 nsamples: 4

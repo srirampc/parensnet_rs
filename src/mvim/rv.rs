@@ -1,32 +1,12 @@
 use itertools::Itertools;
 use ndarray::{Array1, Array2, ArrayView1};
 use std::collections::HashMap;
-use std::hash::Hash;
 use std::rc::Rc;
 
 use crate::{
     mvim::imeasures::{self, redundancy},
-    types::{AssignOps, DbgDisplay, FromToPrimitive, OrderedFloat, OrderedInt},
+    types::{PNInteger, PNFloat},
 };
-
-pub trait MRVInteger:
-    OrderedInt + FromToPrimitive + AssignOps + Hash + DbgDisplay + Copy + Clone
-{
-}
-impl<
-    T: OrderedInt + FromToPrimitive + AssignOps + Hash + DbgDisplay + Copy + Clone,
-> MRVInteger for T
-{
-}
-
-pub trait MRVFloat:
-    OrderedFloat + FromToPrimitive + AssignOps + DbgDisplay + Copy + Clone
-{
-}
-impl<T: OrderedFloat + FromToPrimitive + AssignOps + DbgDisplay + Copy + Clone>
-    MRVFloat for T
-{
-}
 
 #[derive(Debug)]
 pub enum Error {
@@ -57,7 +37,7 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-pub trait MRVTrait<IntT: 'static + MRVInteger, FloatT: 'static + MRVFloat> {
+pub trait MRVTrait<IntT: 'static + PNInteger, FloatT: 'static + PNFloat> {
     fn get_hist(&self, i: IntT) -> Result<Array1<FloatT>, Error>;
     fn get_hist_dim(&self, i: IntT) -> Result<IntT, Error>;
     fn get_mi(&self, i: IntT, j: IntT) -> Result<FloatT, Error>;
@@ -332,8 +312,8 @@ pub trait MRVTrait<IntT: 'static + MRVInteger, FloatT: 'static + MRVFloat> {
 //
 pub struct LMRSA<IntT, FloatT>
 where
-    IntT: 'static + MRVInteger,
-    FloatT: 'static + MRVFloat,
+    IntT: 'static + PNInteger,
+    FloatT: 'static + PNFloat,
 {
     _size: usize,
     nvars: usize,
@@ -345,8 +325,8 @@ where
 
 impl<IntT, FloatT> LMRSA<IntT, FloatT>
 where
-    IntT: 'static + MRVInteger,
-    FloatT: 'static + MRVFloat,
+    IntT: 'static + PNInteger,
+    FloatT: 'static + PNFloat,
 {
     #![allow(clippy::needless_range_loop)]
     pub fn from_mrv_trait(
@@ -486,8 +466,8 @@ where
 
 pub struct LMRDataStructure<IntT, FloatT>
 where
-    IntT: 'static + MRVInteger,
-    FloatT: 'static + MRVFloat,
+    IntT: 'static + PNInteger,
+    FloatT: 'static + PNFloat,
 {
     about: IntT,
     nvars: usize,
@@ -496,8 +476,8 @@ where
 
 impl<IntT, FloatT> LMRDataStructure<IntT, FloatT>
 where
-    IntT: 'static + MRVInteger,
-    FloatT: 'static + MRVFloat,
+    IntT: 'static + PNInteger,
+    FloatT: 'static + PNFloat,
 {
     pub fn new(
         pidata: &impl MRVTrait<IntT, FloatT>,
@@ -525,8 +505,8 @@ where
 
 pub struct LMRSubsetDataStructure<IntT, FloatT>
 where
-    IntT: 'static + MRVInteger,
-    FloatT: 'static + MRVFloat,
+    IntT: 'static + PNInteger,
+    FloatT: 'static + PNFloat,
 {
     subset_map: Rc<HashMap<IntT, usize>>,
     about: IntT,
@@ -536,8 +516,8 @@ where
 
 impl<IntT, FloatT> LMRSubsetDataStructure<IntT, FloatT>
 where
-    IntT: 'static + MRVInteger,
-    FloatT: 'static + MRVFloat,
+    IntT: 'static + PNInteger,
+    FloatT: 'static + PNFloat,
 {
     pub fn new(
         pidata: &impl MRVTrait<IntT, FloatT>,

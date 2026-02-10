@@ -1,13 +1,14 @@
-mod vec;
-
-pub use self::vec::Vec2d;
 use ndarray::{Array, ArrayView, Dimension};
 use num::{Float, FromPrimitive, Integer, One, ToPrimitive, Zero};
 use serde::{Deserialize, Serialize};
 use std::{
-    fmt::{Debug, Display},
+    fmt::Debug,
     ops::{AddAssign, Mul, Range},
 };
+
+
+mod vec;
+pub use self::vec::Vec2d;
 
 #[macro_export]
 macro_rules! map_to_tuple {
@@ -573,8 +574,8 @@ pub struct UniqCounts<T, S> {
 
 pub fn unique<T, S>(srt_data: &[T]) -> UniqCounts<T, S>
 where
-    T: PartialEq + Clone + Debug + Display,
-    S: Zero + One + AddAssign + Clone + Debug + Display,
+    T: PartialEq + Clone + Debug,
+    S: Zero + One + AddAssign + Clone + Debug,
 {
     let mut values = srt_data.to_vec();
     values.dedup();

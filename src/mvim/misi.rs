@@ -13,31 +13,30 @@ use crate::h5::io::{
 };
 use crate::map_with_result_to_tuple;
 use crate::mvim::rv::{
-    Error, LMRDataStructure, LMRSubsetDataStructure, MRVFloat, MRVInteger,
-    MRVTrait,
+    Error, LMRDataStructure, LMRSubsetDataStructure, MRVTrait,
 };
-use crate::types::Pair;
+use crate::types::{PNFloat, PNInteger, Pair};
 use crate::util::{exc_prefix_sum, triu_pair_to_index};
 
-pub enum LMRDSRange<IntT: 'static + MRVInteger, Float: 'static + MRVFloat> {
+pub enum LMRDSRange<IntT: 'static + PNInteger, Float: 'static + PNFloat> {
     Complete(Box<Pair<Vec<LMRDataStructure<IntT, Float>>>>),
     Subset(Box<Pair<Vec<LMRSubsetDataStructure<IntT, Float>>>>),
 }
 
-pub struct MISIRangePair<IntT, FloatT>
+pub struct MISIRangePair<SizeT, IntT, FloatT>
 where
-    IntT: H5Type + MRVInteger,
-    FloatT: H5Type + MRVFloat,
+    SizeT: H5Type + PNInteger,
+    IntT: H5Type + PNInteger,
+    FloatT: H5Type + PNFloat,
 {
     st_ranges: Pair<Range<usize>>,
-    nobs: IntT,
-    nvars: IntT,
-    npairs: IntT,
-    nsi: IntT,
-    nsjv_dim: IntT,
+    nobs: SizeT,
+    nvars: SizeT,
+    npairs: SizeT,
+    nsi: SizeT,
+    hist_start: Pair<Array1<SizeT>>,
+    si_start: Pair<Array1<SizeT>>,
     hist_dim: Pair<Array1<IntT>>,
-    hist_start: Pair<Array1<IntT>>,
-    si_start: Pair<Array1<IntT>>,
     hist: Pair<Array1<FloatT>>,
     mi: Array1<FloatT>,
     si: Pair<Array1<FloatT>>,
@@ -51,24 +50,25 @@ where
     lmr_ds: Option<LMRDSRange<IntT, FloatT>>,
 }
 
-pub enum LMRDSPair<IntT: 'static + MRVInteger, Float: 'static + MRVFloat> {
+pub enum LMRDSPair<IntT: 'static + PNInteger, Float: 'static + PNFloat> {
     Complete(Box<Pair<LMRDataStructure<IntT, Float>>>),
     Subset(Box<Pair<LMRSubsetDataStructure<IntT, Float>>>),
 }
 
-pub struct MISIPair<IntT, FloatT>
+pub struct MISIPair<SizeT, IntT, FloatT>
 where
-    IntT: H5Type + MRVInteger,
-    FloatT: H5Type + MRVFloat,
+    SizeT: H5Type + PNInteger,
+    IntT: H5Type + PNInteger,
+    FloatT: H5Type + PNFloat,
 {
     var_pair: Pair<usize>,
-    nobs: IntT,
-    nvars: IntT,
-    npairs: IntT,
+    nobs: SizeT,
+    nvars: SizeT,
+    npairs: SizeT,
+    hist_start: Pair<SizeT>,
+    si_start: Pair<SizeT>,
     mi: FloatT,
-    hist_start: Pair<IntT>,
     hist_dim: Pair<IntT>,
-    si_start: Pair<IntT>,
     hist: Pair<Array1<FloatT>>,
     si: Pair<Array1<FloatT>>,
     lmr: Pair<Array1<FloatT>>,
@@ -77,10 +77,11 @@ where
     lmr_ds: Option<LMRDSPair<IntT, FloatT>>,
 }
 
-impl<IntT, FloatT> MISIRangePair<IntT, FloatT>
+impl<SizeT, IntT, FloatT> MISIRangePair<SizeT, IntT, FloatT>
 where
-    IntT: H5Type + MRVInteger,
-    FloatT: H5Type + MRVFloat,
+    SizeT: H5Type + PNInteger,
+    IntT: H5Type + PNInteger,
+    FloatT: H5Type + PNFloat,
 {
     pub fn new(
         h5_file: &str,
@@ -89,32 +90,42 @@ where
         let file = hdf5::File::open(h5_file)?;
         let data_g = file.group("data")?;
         // attributes
-        let (nobs, nvars, npairs, nsi, nsjv_dim) = map_with_result_to_tuple![
-            |x| read_scalar_attr::<IntT>(&data_g, x) ;
-            "nobs", "nvars", "npairs", "nsi", "nsjv_dim"
+        let (nobs, nvars, npairs, nsi) = map_with_result_to_tuple![
+            |x| read_scalar_attr::<SizeT>(&data_g, x) ;
+            "nobs", "nvars", "npairs", "nsi"
         ];
         // datasets: hist_dim, hist_start, si_start
-        let (hist_dim, hist_start, si_start) = map_with_result_to_tuple![
-            |x| read1d_pair_of_slices::<IntT, usize>(&data_g, x, &st_ranges) ;
-            "hist_dim", "hist_start", "si_start"
+        let hist_dim = read1d_pair_of_slices::<IntT, usize>(
+            &data_g, "hist_dim", &st_ranges,
+        )?;
+        let (hist_start, si_start) = map_with_result_to_tuple![
+            |x| read1d_pair_of_slices::<SizeT, usize>(&data_g, x, &st_ranges) ;
+             "hist_start", "si_start"
         ];
         let mi = data_g.dataset("mi")?.read_1d::<FloatT>()?;
         // hist
-        let hist = read1d_pair_of_slices::<FloatT, IntT>(
+        let hist = read1d_pair_of_slices::<FloatT, usize>(
             &data_g,
             "hist",
             &(hist_start
-                .zip_map(&hist_dim, |start, dim| start[0]..(start[0] + dim.sum()))
+                .zip_map(&hist_dim, |start, dim| {
+                    let r_start = start[0].to_usize().unwrap();
+                    let r_size = dim.sum().to_usize().unwrap();
+                    r_start..(r_start + r_size)
+                })
                 .to_tuple()),
         )?;
         // si and lmr
         let sist_ranges = si_start
             .zip_map(&hist_dim, |start, dim| {
-                start[0]..(start[0] + nvars * dim.sum())
+                let r_start = start[0].to_usize().unwrap();
+                let r_size =
+                    nvars.to_usize().unwrap() * dim.sum().to_usize().unwrap();
+                r_start..(r_start + r_size)
             })
             .to_tuple();
         let (si, lmr) = map_with_result_to_tuple![
-            |x| read1d_pair_of_slices::<FloatT, IntT>(&data_g, x, &sist_ranges) ;
+            |x| read1d_pair_of_slices::<FloatT, usize>(&data_g, x, &sist_ranges) ;
             "si", "lmr"
         ];
         // range lookup arrays/data structures
@@ -143,7 +154,6 @@ where
             nvars,
             npairs,
             nsi,
-            nsjv_dim,
             hist_dim,
             hist_start,
             si_start,
@@ -286,10 +296,12 @@ where
     }
 }
 
-impl<IntT, FloatT> MRVTrait<IntT, FloatT> for MISIRangePair<IntT, FloatT>
+impl<SizeT, IntT, FloatT> MRVTrait<IntT, FloatT>
+    for MISIRangePair<SizeT, IntT, FloatT>
 where
-    IntT: H5Type + MRVInteger,
-    FloatT: H5Type + MRVFloat,
+    SizeT: H5Type + PNInteger,
+    IntT: H5Type + PNInteger,
+    FloatT: H5Type + PNFloat,
 {
     fn get_hist(&self, i: IntT) -> Result<Array1<FloatT>, Error> {
         let (ridx, _vloc) = self._range_offset(i)?;
@@ -401,10 +413,11 @@ where
     }
 }
 
-impl<IntT, FloatT> MISIPair<IntT, FloatT>
+impl<SizeT, IntT, FloatT> MISIPair<SizeT, IntT, FloatT>
 where
-    IntT: H5Type + MRVInteger,
-    FloatT: H5Type + MRVFloat,
+    SizeT: H5Type + PNInteger,
+    IntT: H5Type + PNInteger,
+    FloatT: H5Type + PNFloat,
 {
     pub fn new(
         h5_file: &str,
@@ -415,33 +428,43 @@ where
         let data_g = file.group("data")?;
         // attributes
         let (nobs, nvars, npairs) = map_with_result_to_tuple![
-            |x| read_scalar_attr::<IntT>(&data_g, x) ;
+            |x| read_scalar_attr::<SizeT>(&data_g, x) ;
             "nobs", "nvars", "npairs"
         ];
         // read mi
         let mi: FloatT =
             read1d_point(&data_g, "mi", triu_pair_to_index(nvars, pi, pj))?;
+        let hist_dim =
+            read1d_pair_of_points::<IntT, usize>(&data_g, "hist_dim", (pi, pj))?;
         // start points of pair pi, pj
-        let (hist_dim, hist_start, si_start) = map_with_result_to_tuple![
-            |x| read1d_pair_of_points::<IntT, usize>(&data_g, x, (pi, pj)) ;
-            "hist_dim", "hist_start", "si_start"
+        let (hist_start, si_start) = map_with_result_to_tuple![
+            |x| read1d_pair_of_points::<SizeT, usize>(&data_g, x, (pi, pj)) ;
+            "hist_start", "si_start"
         ];
 
         //
-        let hist = read1d_pair_of_slices::<FloatT, IntT>(
+        let hist = read1d_pair_of_slices::<FloatT, usize>(
             &data_g,
             "hist",
             &(hist_start
-                .zip_map(&hist_dim, |start, dim| *start..(*start + *dim))
+                .zip_map(&hist_dim, |start, dim| {
+                    let ustart = (*start).to_usize().unwrap();
+                    let udim = (*dim).to_usize().unwrap();
+                    ustart..(ustart + udim)
+                })
                 .to_tuple()),
         )?;
         // si and lmr
         let sist_ranges = si_start
-            .zip_map(&hist_dim, |start, dim| *start..(*start + nvars * *dim))
+            .zip_map(&hist_dim, |start, dim| {
+                let ustart = (*start).to_usize().unwrap();
+                let udim = nvars.to_usize().unwrap() * (*dim).to_usize().unwrap();
+                ustart..(ustart + udim)
+            })
             .to_tuple();
         let (si, lmr) = (
-            read1d_pair_of_slices::<FloatT, IntT>(&data_g, "si", &sist_ranges)?,
-            read1d_pair_of_slices::<FloatT, IntT>(&data_g, "lmr", &sist_ranges)?,
+            read1d_pair_of_slices::<FloatT, usize>(&data_g, "si", &sist_ranges)?,
+            read1d_pair_of_slices::<FloatT, usize>(&data_g, "lmr", &sist_ranges)?,
         );
 
         Ok(MISIPair {
@@ -532,10 +555,11 @@ where
     }
 }
 
-impl<IntT, FloatT> MRVTrait<IntT, FloatT> for MISIPair<IntT, FloatT>
+impl<SizeT, IntT, FloatT> MRVTrait<IntT, FloatT> for MISIPair<SizeT, IntT, FloatT>
 where
-    IntT: H5Type + MRVInteger,
-    FloatT: H5Type + MRVFloat,
+    SizeT: H5Type + PNInteger,
+    IntT: H5Type + PNInteger,
+    FloatT: H5Type + PNFloat,
 {
     fn get_hist(&self, i: IntT) -> Result<Array1<FloatT>, Error> {
         let ridx = self.range_of(i)?;
@@ -721,8 +745,10 @@ mod tests {
         crate::tests::log_init();
         for ((pi, pj), (rmi, rpuc)) in PAIRS_MI_PUC.iter() {
             let (i, j) = (*pi, *pj);
-            let bpair =
-                MISIPair::<i32, f32>::new(&MISI_H5, (i as usize, j as usize))?;
+            let bpair = MISIPair::<i64, i32, f32>::new(
+                &MISI_H5,
+                (i as usize, j as usize),
+            )?;
             let pmi = bpair.get_mi(i, j)?;
             let ppuc = bpair.accumulate_redundancies(i, j)?;
             let lpuc = bpair.compute_lm_puc(i, j)?;
@@ -743,7 +769,8 @@ mod tests {
     #[test]
     pub fn test_misi_range_pair_full() -> Result<()> {
         crate::tests::log_init();
-        let mut bprange = MISIRangePair::<i32, f32>::new(&MISI_H5, (0..6, 0..6))?;
+        let mut bprange =
+            MISIRangePair::<i64, i32, f32>::new(&MISI_H5, (0..6, 0..6))?;
         for ((pi, pj), (rmi, rpuc)) in PAIRS_MI_PUC.iter() {
             let (i, j) = (*pi, *pj);
             let pmi = bprange.get_mi(i, j)?;
@@ -758,8 +785,18 @@ mod tests {
             let dspuc_diff = (dspuc - lpuc).abs() < 1e-3;
             debug!(
                 "i, j: ({}, {}); MIs ({}, {}, {}); PUC: [({} ({} {}) ({} {}) ({} {})]",
-                i, j, rmi, pmi, mi_diff, rpuc, ppuc, puc_diff, lpuc, lpuc_diff,
-                dspuc, dspuc_diff,
+                i,
+                j,
+                rmi,
+                pmi,
+                mi_diff,
+                rpuc,
+                ppuc,
+                puc_diff,
+                lpuc,
+                lpuc_diff,
+                dspuc,
+                dspuc_diff,
             );
             assert!(mi_diff);
             assert!(puc_diff);
@@ -776,7 +813,7 @@ mod tests {
         let (i, j) = PAIRS_LIST[0];
         let splist = SAMPLES_LIST[0].clone();
         let mut bpair =
-            MISIPair::<i32, f32>::new(&MISI_H5, (i as usize, j as usize))?;
+            MISIPair::<i64, i32, f32>::new(&MISI_H5, (i as usize, j as usize))?;
         bpair.set_lmr_ds(Some(&splist))?;
         if let Some(LMRDSPair::Subset(ref subset_dss)) = bpair.lmr_ds {
             let (fmin, smin) = (
@@ -822,8 +859,10 @@ mod tests {
     pub fn test_misi_pair_subset_lmr1() -> Result<()> {
         crate::tests::log_init();
         for ((i, j), puc_vec) in SAMPLES_PUC.iter() {
-            let mut bpair =
-                MISIPair::<i32, f32>::new(&MISI_H5, (*i as usize, *j as usize))?;
+            let mut bpair = MISIPair::<i64, i32, f32>::new(
+                &MISI_H5,
+                (*i as usize, *j as usize),
+            )?;
             let (exp_mi, exp_puc) = PAIRS_MI_PUC[&(*i, *j)];
             let fpuc = bpair.accumulate_redundancies(*i, *j)?;
             for (idx, rvlist) in SAMPLES_LIST.iter().enumerate() {
@@ -861,8 +900,10 @@ mod tests {
         crate::tests::log_init();
         for ((i, j), puc_vec) in SAMPLES_PUC2.iter() {
             let (exp_mi, exp_puc) = PAIRS_MI_PUC2[&(*i, *j)];
-            let mut bpair =
-                MISIPair::<i32, f32>::new(&MISI_H5, (*i as usize, *j as usize))?;
+            let mut bpair = MISIPair::<i64, i32, f32>::new(
+                &MISI_H5,
+                (*i as usize, *j as usize),
+            )?;
             let fpuc = bpair.accumulate_redundancies(*i, *j)?;
             for (idx, rvlist) in SAMPLES_LIST2.iter().enumerate() {
                 bpair.set_lmr_ds(Some(rvlist))?;
@@ -897,7 +938,8 @@ mod tests {
     #[test]
     pub fn test_misi_range_pair_subset_lmr1() -> Result<()> {
         crate::tests::log_init();
-        let mut bprange = MISIRangePair::<i32, f32>::new(&MISI_H5, (0..6, 0..6))?;
+        let mut bprange =
+            MISIRangePair::<i64, i32, f32>::new(&MISI_H5, (0..6, 0..6))?;
         for ((i, j), puc_vec) in SAMPLES_PUC.iter() {
             let (exp_mi, exp_puc) = PAIRS_MI_PUC[&(*i, *j)];
             let fpuc = bprange.accumulate_redundancies(*i, *j)?;
@@ -936,7 +978,7 @@ mod tests {
     pub fn test_misi_range_pair_subset_lmr2() -> Result<()> {
         crate::tests::log_init();
         let mut bprange =
-            MISIRangePair::<i32, f32>::new(&MISI_H5, (0..6, 0..46))?;
+            MISIRangePair::<i64, i32, f32>::new(&MISI_H5, (0..6, 0..46))?;
         for ((i, j), puc_vec) in SAMPLES_PUC2.iter() {
             let (exp_mi, exp_puc) = PAIRS_MI_PUC2[&(*i, *j)];
             let fpuc = bprange.accumulate_redundancies(*i, *j)?;
