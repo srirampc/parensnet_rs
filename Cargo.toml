@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.100"
 clap = { version = "4.5.54", features = ["derive"] }
+csv = "1.4.0"
 chrono = "0.4.43"
 env_logger = "0.11.8"
 flate2 = "1.1.5"
@@ -14,15 +15,16 @@ hdf5 = { path = "ext/hdf5-rust/hdf5", package = "hdf5-metno", features = [
     "mpio",
 ] }
 lazy_static = "1.5.0"
-#lightgbm3 = "1.0.10"
 lightgbm3 = { path = "ext/lightgbm3-rs" }
+#lightgbm3 = "1.0.10"
 #lightgbm3-sys = "1.0.8"
 log = "0.4.29"
 mpi = { version = "0.8.1", features = ["user-operations", "derive"] }
 ndarray = { version = "0.17.1", features = ["serde", "approx"] }
 ndarray-rand = "0.16.0"
 num = "0.4"
-polars = "0.52.0"
+# Removing polars as it is causing long compile times
+#polars = "0.52.0"
 rand = "0.9.2"
 serde = { version = "1.0.228", features = ["derive", "std"] }
 serde_json = "1.0"

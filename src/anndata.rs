@@ -5,12 +5,11 @@ use hdf5::{
 };
 use ndarray::{Array1, Array2};
 use num::{Float, FromPrimitive, Zero};
-use polars::prelude::{CsvReader, SerReader};
 use sope::ensure_eq;
 use std::{collections::HashMap, iter::zip, ops::Range};
 use thiserror::Error;
 
-use crate::util::around;
+use crate::util::{around, read_csv_column};
 
 #[derive(Error, Debug)]
 pub enum AnnDataError {
@@ -221,21 +220,10 @@ where
         n_decimals: Option<usize>,
     ) -> Result<Self> {
         let gene_column = gene_column.unwrap_or("gene");
-        let csv_file = std::fs::File::open(gene_csv)?;
-        let df = CsvReader::new(csv_file).finish()?;
-        let gene_series = df.column(gene_column)?.as_series().ok_or(
-            AnnDataError::MissingGeneColumnError(gene_column.to_string()),
-        )?;
-        let (genes, indices): (Vec<String>, Vec<usize>) = gene_series
-            .str()?
-            .iter()
-            .flat_map(|x| {
-                if let Some(y) = x {
-                    adata.get_gene_index(y).map(|idx| (y.to_string(), idx))
-                } else {
-                    None
-                }
-            })
+        let in_genes = read_csv_column(gene_csv, gene_column)?;
+        let (genes, indices): (Vec<String>, Vec<usize>) = in_genes
+            .into_iter()
+            .flat_map(|y| adata.get_gene_index(&y).map(|idx| (y, idx)))
             .collect();
         let ngenes = genes.len();
 

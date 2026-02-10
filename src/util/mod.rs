@@ -1,3 +1,4 @@
+use anyhow::{Result, bail};
 use ndarray::{Array, ArrayView, Dimension};
 use num::{Float, FromPrimitive, Integer, One, ToPrimitive, Zero};
 use serde::{Deserialize, Serialize};
@@ -5,7 +6,7 @@ use std::{
     fmt::Debug,
     ops::{AddAssign, Mul, Range},
 };
-
+use thiserror::Error;
 
 mod vec;
 pub use self::vec::Vec2d;
@@ -115,34 +116,28 @@ macro_rules! cond_eprintln {
 pub type RangePair<T> = (Range<T>, Range<T>);
 pub type VecPair<T> = (Vec<T>, Vec<T>);
 
-#[derive(Debug)]
-pub enum Error {
+#[derive(Error, Debug)]
+pub enum UtilError {
+    #[error("Error reading file {0}:: Soure Error {1}")]
     ReadFileError(String, std::io::Error),
+    #[error("Error reading csv file {0}:: Soure Error {1}")]
+    CSVReadFileError(String, String),
+    #[error("CSV Input doesn't have column {0}")]
+    MissingColumnError(String),
 }
 
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Error::ReadFileError(fname, err) => {
-                write!(f, "Error reading file {fname}:: Soure Error {err}")
-            }
-        }
-    }
-}
-
-impl std::error::Error for Error {}
-
-pub fn read_file_to_string(input_file: &str) -> Result<String, Error> {
+pub fn read_file_to_string(input_file: &str) -> Result<String> {
     use log::info;
     let data_file = std::path::PathBuf::from(input_file);
     info!("Loading from file : [{}]", data_file.display());
 
-    std::fs::read_to_string(data_file).map_err(|err| {
-        Error::ReadFileError(
+    match std::fs::read_to_string(data_file) {
+        Ok(contents) => Ok(contents),
+        Err(err) => bail!(UtilError::ReadFileError(
             format!("I/O error while reading file {}", input_file),
             err,
-        )
-    })
+        )),
+    }
 }
 
 pub fn top_half_range<T: Integer + Copy + FromPrimitive>(
@@ -616,8 +611,47 @@ where
     }
 }
 
+//pub fn read_csv_column_pandas(f_csv: &str, column: &str) -> Result<Vec<String>> {
+//    use polars::prelude::{CsvReader, SerReader};
+//    let csv_file = std::fs::File::open(f_csv)?;
+//    let df = CsvReader::new(csv_file).finish()?;
+//    let gene_series = df
+//        .column(column)?
+//        .as_series()
+//        .ok_or(UtilError::MissingColumnError(column.to_string()))?;
+//    Ok(gene_series
+//        .str()?
+//        .iter()
+//        .flat_map(|x| x.map(|x| x.to_string()))
+//        .collect())
+//}
+
+pub fn read_csv_column(f_csv: &str, column: &str) -> Result<Vec<String>> {
+    let csv_file = std::fs::File::open(f_csv)?;
+    // Build the CSV reader and iterate over each record.
+    let mut rdr = csv::Reader::from_reader(csv_file);
+    let header = rdr.headers()?;
+    let (col_index, _) = header
+        .iter()
+        .enumerate()
+        .find(|(_i, x)| (*x).eq(column))
+        .ok_or(UtilError::MissingColumnError(column.to_string()))?;
+
+    let rvec: Vec<String> = rdr
+        .records()
+        .filter_map(|x| match x {
+            std::result::Result::Ok(record) => {
+                record.get(col_index).map(|x| x.to_string())
+            }
+            Err(_err) => None,
+        })
+        .collect();
+    Ok(rvec)
+}
+
 #[cfg(test)]
 mod tests {
+    use anyhow::Result;
     use log::{debug, info};
     use ndarray::Array1;
 
@@ -723,5 +757,40 @@ mod tests {
             let rvec = rvec[..rvec.len() - 1].to_vec();
             debug!(" {} {:?}", rank, rvec,);
         }
+    }
+
+    #[test]
+    fn test_read_csv() -> Result<()> {
+        crate::tests::log_init();
+        use super::read_csv_column;
+        use crate::test_data_file_path;
+
+        let tf_csv = test_data_file_path!("/pbmc/trrust_tf.txt");
+        let csv_strs = read_csv_column(tf_csv, "gene")?;
+
+        debug!("V: {}", csv_strs.len());
+        assert_eq!(csv_strs.len(), 2862);
+        assert_eq!(
+            csv_strs[..5],
+            vec!["A2M", "AATF", "ABCA1", "ABCA3", "ABCB1"]
+        );
+        assert_eq!(
+            csv_strs[2857..],
+            vec!["ZNF444", "ZNF652", "ZNF750", "ZNF76", "ZNRD1"]
+        );
+        //let csv_strs2 = read_csv_column_pandas(tf_csv, "gene")?;
+        //debug!("V: {}", csv_strs2.len());
+        //assert_eq!(csv_strs2.len(), 2862);
+        //assert_eq!(
+        //    csv_strs2[..5],
+        //    vec!["A2M", "AATF", "ABCA1", "ABCA3", "ABCB1"]
+        //);
+
+        //assert_eq!(
+        //    csv_strs2[2857..],
+        //    vec!["ZNF444", "ZNF652", "ZNF750", "ZNF76", "ZNRD1"]
+        //);
+
+        Ok(())
     }
 }

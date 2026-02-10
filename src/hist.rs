@@ -1,11 +1,21 @@
 use ndarray::{Array1, Array2, ArrayView1, s};
-use num::{FromPrimitive, traits::float::TotalOrder};
+use num::{Float, FromPrimitive, traits::float::TotalOrder};
 use std::clone::Clone;
-use std::ops::AddAssign;
+use std::fmt::Debug;
 
-use crate::types::{AddFromZero, AssignOps, DbgDisplay, OrderedFloat};
-use crate::util::{unique};
-fn map_data2bin<T: OrderedFloat>(bin_edges: &[T], qry_dx: &T) -> usize {
+use crate::types::{AddFromZero, AssignOps};
+use crate::util::unique;
+
+pub trait HSFloat:
+    Float + TotalOrder + FromPrimitive + AssignOps + Debug + Clone
+{
+}
+impl<T: Float + TotalOrder + FromPrimitive + AssignOps + Debug + Clone> HSFloat
+    for T
+{
+}
+
+fn map_data2bin<T: Float + TotalOrder>(bin_edges: &[T], qry_dx: &T) -> usize {
     let fidx = match bin_edges.binary_search_by(|ex| ex.total_cmp(qry_dx)) {
         Ok(kidx) => kidx,
         Err(eidx) => eidx,
@@ -15,7 +25,7 @@ fn map_data2bin<T: OrderedFloat>(bin_edges: &[T], qry_dx: &T) -> usize {
 
 pub fn histogram_1d<T, S>(data: ArrayView1<T>, edges: &[T]) -> Array1<S>
 where
-    T: OrderedFloat,
+    T: Float + TotalOrder,
     S: AddFromZero + Clone,
 {
     let mut hist = Array1::<S>::from_elem(edges.len() - 1, S::zero());
@@ -33,7 +43,7 @@ pub fn histogram_2d<T, S>(
     y_bin_edges: &[T],
 ) -> Array2<S>
 where
-    T: OrderedFloat,
+    T: Float + TotalOrder,
     S: AddFromZero + Clone,
 {
     let mut hist = Array2::<S>::from_elem(
@@ -54,7 +64,7 @@ pub fn joint_histogram<T>(
     y_bin_edges: &[T],
 ) -> (Array2<T>, Array1<T>, Array1<T>)
 where
-    T: OrderedFloat + AddAssign + Clone,
+    T: Float + TotalOrder + AddFromZero + Clone,
 {
     (
         histogram_2d(x_data, x_bin_edges, y_data, y_bin_edges),
@@ -73,7 +83,7 @@ fn optimal_bayesian_blocks<T>(
     block_sizes: &Array1<T>,
 ) -> OptimumBlocks<T>
 where
-    T: 'static + OrderedFloat + FromPrimitive + AssignOps + DbgDisplay,
+    T: 'static + HSFloat,
 {
     let n = counts.len();
     let mut block_counts = Array1::<T>::zeros(n);
@@ -123,7 +133,7 @@ where
 
 pub fn bayesian_blocks_bin_edges<T>(data: ArrayView1<T>) -> Array1<T>
 where
-    T: 'static + OrderedFloat + FromPrimitive + AssignOps + DbgDisplay,
+    T: 'static + HSFloat,
 {
     //
     let dt_half = T::one() / (T::one() + T::one());
@@ -162,7 +172,7 @@ where
 
 pub fn bb_histogram<T>(x_data: ArrayView1<T>) -> Array1<T>
 where
-    T: 'static + OrderedFloat + FromPrimitive + AssignOps + DbgDisplay,
+    T: 'static + HSFloat,
 {
     histogram_1d(
         x_data,
@@ -175,7 +185,7 @@ pub fn bb_joint_histogram<T>(
     y_data: ArrayView1<T>,
 ) -> (Array2<T>, Array1<T>, Array1<T>)
 where
-    T: 'static + OrderedFloat + FromPrimitive + AssignOps + DbgDisplay,
+    T: 'static + HSFloat,
 {
     let (x_bin_edges, y_bin_edges) = (
         bayesian_blocks_bin_edges(x_data),
