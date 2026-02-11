@@ -25,7 +25,7 @@ ndarray-rand = "0.16.0"
 num = "0.4"
 # Removing polars as it is causing long compile times
 #polars = "0.52.0"
-rand = "0.9.2"
+rand = "0.10.0"
 serde = { version = "1.0.228", features = ["derive", "std"] }
 serde_json = "1.0"
 serde-saphyr = "0.0.18"
