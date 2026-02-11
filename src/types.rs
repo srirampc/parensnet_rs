@@ -9,14 +9,17 @@ use std::{
     fmt::Debug,
     hash::Hash,
     marker::Sized,
-    ops::{AddAssign, MulAssign, SubAssign},
+    ops::{AddAssign, DivAssign, MulAssign, SubAssign},
 };
 
 pub trait AddFromZero: Zero + One + AddAssign {}
 impl<T: Zero + One + AddAssign> AddFromZero for T {}
 
-pub trait AssignOps: Sized + AddAssign + MulAssign + SubAssign {}
-impl<T: Sized + AddAssign + MulAssign + SubAssign> AssignOps for T {}
+pub trait AssignOps:
+    Sized + AddAssign + SubAssign + MulAssign + DivAssign
+{
+}
+impl<T: Sized + AddAssign + SubAssign + MulAssign + DivAssign> AssignOps for T {}
 
 pub trait FromToPrimitive: FromPrimitive + ToPrimitive {}
 impl<T: FromPrimitive + ToPrimitive> FromToPrimitive for T {}

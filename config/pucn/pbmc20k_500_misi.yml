@@ -4,11 +4,11 @@ puc_file: "tmp/adata.20k.500.lmr_puc.h5"
 pidc_file: "tmp/adata.20k.500.lmr_pidc.h5"
 #
 nrounds: 0
-nsamples: 20
+nsamples: 0
 nobs: 0
 nvars: 0
 mode:
-  - "misi"
+  - misi
   #- "samples_ranges"
   #- "puc2pidc"
 tbase: "e"

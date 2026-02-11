@@ -1,42 +1,52 @@
+use std::marker::PhantomData;
+
 use super::{
     IdVResults, WorkDistributor, WorkflowArgs, collect_samples, pair_indices,
 };
 use crate::{
     comm::CommIfx,
     cond_info,
-    h5::mpio::{block_write1d, block_write2d, create_file},
+    h5::mpio,
     mvim::{
         misi::MISIRangePair,
         rv::{Error as RVError, MRVTrait},
     },
+    types::{PNFloat, PNInteger},
     util::{RangePair, Vec2d},
 };
 
 use anyhow::{Result, anyhow};
-use hdf5::Error as H5Error;
+use hdf5::{Error as H5Error, H5Type};
+use mpi::traits::Equivalence;
 use ndarray::{Array1, Array2, ArrayView1};
 use sope::reduction::any_of;
 
-pub type PUCResults = IdVResults<i32, f32>;
+pub type PUCResults<IntT, FloatT> = IdVResults<IntT, FloatT>;
 
-fn save_puc(
-    puc_results: PUCResults,
-    mpi_ifx: &CommIfx,
-    puc_file: &str,
-) -> Result<(), H5Error> {
-    let h_file = create_file(mpi_ifx, puc_file)?;
-    cond_info!(
-        mpi_ifx.is_root();
-        "Saving Data :: {:?} {:?} {}",
-        puc_results.index.shape(),
-        puc_results.val.shape(),
-        puc_file,
-    );
-    sope::gather_debug!(mpi_ifx.comm(); "{:?}", puc_results.len());
-    let h_group = h_file.create_group("data").unwrap();
-    block_write2d(mpi_ifx, &h_group, "index", &puc_results.index)?;
-    block_write1d(mpi_ifx, &h_group, "puc", &puc_results.val)?;
-    Ok(())
+pub trait PUCRTrait<IntT, FloatT> {
+    fn save(&self, mpi_ifx: &CommIfx, puc_file: &str) -> Result<(), H5Error>;
+}
+
+impl<IntT, FloatT> PUCRTrait<IntT, FloatT> for PUCResults<IntT, FloatT>
+where
+    IntT: H5Type + Default + Equivalence,
+    FloatT: H5Type + Default + Equivalence,
+{
+    fn save(&self, mpi_ifx: &CommIfx, puc_file: &str) -> Result<(), H5Error> {
+        let h_file = mpio::create_file(mpi_ifx, puc_file)?;
+        cond_info!(
+            mpi_ifx.is_root();
+            "Saving Data :: {:?} {:?} {}",
+            self.index.shape(),
+            self.val.shape(),
+            puc_file,
+        );
+        sope::gather_debug!(mpi_ifx.comm(); "{:?}", self.val.len());
+        let h_group = h_file.create_group("data").unwrap();
+        mpio::block_write2d(mpi_ifx, &h_group, "index", &self.index)?;
+        mpio::block_write1d(mpi_ifx, &h_group, "puc", &self.val)?;
+        Ok(())
+    }
 }
 
 pub struct SampledPUCWorkflow<'a> {
@@ -45,14 +55,22 @@ pub struct SampledPUCWorkflow<'a> {
     pub args: &'a WorkflowArgs,
 }
 
-impl<'a> SampledPUCWorkflow<'a> {
-    fn run_with_samples(
-        &self,
-        st_row: ArrayView1<i32>,
-        r_samples: &Vec2d<i32>,
-        m_range: &MISIRangePair<i64, i32, f32>,
-    ) -> Result<f32, RVError> {
-        let mut avg_red: f32 = 0.0;
+struct SampledWorkFlowHelper<SizeT, IntT, FloatT> {
+    _a: PhantomData<(SizeT, IntT, FloatT)>,
+}
+
+impl<SizeT, IntT, FloatT> SampledWorkFlowHelper<SizeT, IntT, FloatT>
+where
+    SizeT: 'static + PNInteger + H5Type + Default + Equivalence,
+    IntT: PNInteger + H5Type + Default + Equivalence,
+    FloatT: 'static + PNFloat + H5Type + Default + Equivalence,
+{
+    fn rows_puc(
+        st_row: ArrayView1<IntT>,
+        r_samples: &Vec2d<IntT>,
+        m_range: &MISIRangePair<SizeT, IntT, FloatT>,
+    ) -> Result<FloatT, RVError> {
+        let mut avg_red: FloatT = FloatT::zero();
         let (src, tgt) = (st_row[0], st_row[1]);
         let nrounds = r_samples.nrows();
         for irow in 0..nrounds {
@@ -63,25 +81,25 @@ impl<'a> SampledPUCWorkflow<'a> {
             )?;
             avg_red += redv;
         }
-        avg_red /= nrounds as f32;
+        avg_red /= FloatT::from_usize(nrounds).unwrap();
         Ok(avg_red)
     }
 
-    fn run_st_ranges(
-        &self,
+    fn ranges_puc(
+        swf: &SampledPUCWorkflow,
         st_ranges: &RangePair<usize>,
-        r_samples: Option<&Vec2d<i32>>,
-    ) -> Result<PUCResults> {
-        let m_range = MISIRangePair::<i64, i32, f32>::new(
-            &self.args.misi_data_file,
+        r_samples: Option<&Vec2d<IntT>>,
+    ) -> Result<PUCResults<IntT, FloatT>> {
+        let m_range = MISIRangePair::<SizeT, IntT, FloatT>::new(
+            &swf.args.misi_data_file,
             st_ranges.clone(),
         )?;
         let r_pindex = pair_indices(st_ranges.clone());
-        let mut r_pucs = Array1::from_vec(vec![0.0f32; r_pindex.nrows()]);
+        let mut r_pucs = Array1::from_vec(vec![FloatT::zero(); r_pindex.nrows()]);
         for (idx, st_row) in r_pindex.rows().into_iter().enumerate() {
             r_pucs[idx] = match r_samples {
                 Some(samples_vec) => {
-                    self.run_with_samples(st_row, samples_vec, &m_range)?
+                    Self::rows_puc(st_row, samples_vec, &m_range)?
                 }
                 None => {
                     let (src, tgt) = (st_row[0], st_row[1]);
@@ -92,17 +110,20 @@ impl<'a> SampledPUCWorkflow<'a> {
         Ok(PUCResults::new(r_pindex, r_pucs))
     }
 
-    fn run_batch(
-        &self,
+    fn batch_puc(
+        swf: &SampledPUCWorkflow,
         bid: usize,
-        rsamples: Option<&Vec2d<i32>>,
-    ) -> Result<PUCResults> {
-        self.run_st_ranges(
-            self.wdistr.pairs_2d().batch_range(bid, self.mpi_ifx.rank),
+        rsamples: Option<&Vec2d<IntT>>,
+    ) -> Result<PUCResults<IntT, FloatT>> {
+        Self::ranges_puc(
+            swf,
+            swf.wdistr.pairs_2d().batch_range(bid, swf.mpi_ifx.rank),
             rsamples,
         )
     }
+}
 
+impl<'a> SampledPUCWorkflow<'a> {
     pub fn run(&self) -> Result<()> {
         let nbatches = self.wdistr.pairs_2d().num_batches();
         // allow for samples being none
@@ -128,12 +149,18 @@ impl<'a> SampledPUCWorkflow<'a> {
             }
         };
         let bat_results: Result<Vec<_>> = (0..nbatches)
-            .map(|bidx| self.run_batch(bidx, rsamples.as_ref()))
+            .map(|bidx| {
+                SampledWorkFlowHelper::<i64, i32, f32>::batch_puc(
+                    self,
+                    bidx,
+                    rsamples.as_ref(),
+                )
+            })
             .collect();
         match bat_results {
             Ok(vpair_reds) => {
                 let merged_results = PUCResults::merge(&vpair_reds);
-                save_puc(merged_results, self.mpi_ifx, &self.args.puc_file)?;
+                merged_results.save(self.mpi_ifx, &self.args.puc_file)?;
                 Ok(())
             }
             Err(err) => Err(err),
@@ -147,12 +174,20 @@ pub struct LMRPUCWorkflow<'a> {
     pub args: &'a WorkflowArgs,
 }
 
-impl<'a> LMRPUCWorkflow<'a> {
-    fn run_with_misi_range(
-        &self,
-        m_range: &MISIRangePair<i64, i32, f32>,
-        r_pindex: &Array2<i32>,
-        r_pucs: &mut Array1<f32>,
+struct LMRWorkFlowHelper<SizeT, IntT, FloatT> {
+    _a: PhantomData<(SizeT, IntT, FloatT)>,
+}
+
+impl<SizeT, IntT, FloatT> LMRWorkFlowHelper<SizeT, IntT, FloatT>
+where
+    SizeT: 'static + PNInteger + H5Type + Default + Equivalence,
+    IntT: PNInteger + H5Type + Default + Equivalence,
+    FloatT: 'static + PNFloat + H5Type + Default + Equivalence,
+{
+    fn misi_range_puc(
+        m_range: &MISIRangePair<SizeT, IntT, FloatT>,
+        r_pindex: &Array2<IntT>,
+        r_pucs: &mut Array1<FloatT>,
     ) -> Result<()> {
         for (idx, st_row) in r_pindex.rows().into_iter().enumerate() {
             let (src, tgt) = (st_row[0], st_row[1]);
@@ -162,15 +197,16 @@ impl<'a> LMRPUCWorkflow<'a> {
         Ok(())
     }
 
-    fn run_st_ranges(
-        &self,
+    fn ranges_puc(
+        lwf: &LMRPUCWorkflow,
         st_ranges: &RangePair<usize>,
-        r_samples: Option<&Vec2d<i32>>,
-    ) -> Result<PUCResults> {
+        r_samples: Option<&Vec2d<IntT>>,
+    ) -> Result<PUCResults<IntT, FloatT>> {
         let r_pindex = pair_indices(st_ranges.clone());
-        let mut r_pucs = Array1::from_vec(vec![0.0f32; r_pindex.nrows()]);
-        let mut m_range = MISIRangePair::<i64, i32, f32>::new(
-            &self.args.misi_data_file,
+        let mut r_pucs =
+            Array1::from_vec(vec![FloatT::default(); r_pindex.nrows()]);
+        let mut m_range = MISIRangePair::<SizeT, IntT, FloatT>::new(
+            &lwf.args.misi_data_file,
             st_ranges.clone(),
         )?;
 
@@ -179,34 +215,39 @@ impl<'a> LMRPUCWorkflow<'a> {
                 let nrounds = samples_vec.nrows();
                 for irow in 0..nrounds {
                     m_range.set_lmr_ds(Some(samples_vec.row(irow)))?;
-                    self.run_with_misi_range(&m_range, &r_pindex, &mut r_pucs)?;
+                    Self::misi_range_puc(&m_range, &r_pindex, &mut r_pucs)?;
                 }
                 nrounds
             }
             None => {
                 m_range.set_lmr_ds(None)?;
-                self.run_with_misi_range(&m_range, &r_pindex, &mut r_pucs)?;
+                Self::misi_range_puc(&m_range, &r_pindex, &mut r_pucs)?;
                 1usize
             }
         };
         for rval in r_pucs.iter_mut() {
-            *rval /= nrounds as f32;
+            *rval /= FloatT::from_usize(nrounds).unwrap();
         }
         Ok(PUCResults::new(r_pindex, r_pucs))
     }
 
-    fn run_batch(
-        &self,
+    fn batch_puc(
+        lwf: &LMRPUCWorkflow,
         bid: usize,
-        rsamples: Option<&Vec2d<i32>>,
-    ) -> Result<PUCResults> {
-        self.run_st_ranges(
-            self.wdistr.pairs_2d().batch_range(bid, self.mpi_ifx.rank),
+        rsamples: Option<&Vec2d<IntT>>,
+    ) -> Result<PUCResults<IntT, FloatT>> {
+        LMRWorkFlowHelper::<SizeT, IntT, FloatT>::ranges_puc(
+            lwf,
+            lwf.wdistr.pairs_2d().batch_range(bid, lwf.mpi_ifx.rank),
             rsamples,
         )
     }
+}
 
+impl<'a> LMRPUCWorkflow<'a> {
     pub fn run(&self) -> Result<()> {
+        type HelperT = LMRWorkFlowHelper<i64, i32, f32>;
+        type PT = PUCResults<i32, i64>;
         let nbatches = self.wdistr.pairs_2d().num_batches();
         let rsamples = match collect_samples::<i32>(
             self.mpi_ifx,
@@ -230,9 +271,9 @@ impl<'a> LMRPUCWorkflow<'a> {
             }
         };
 
-        let bat_results: Result<Vec<PUCResults>> = (0..nbatches)
-            .map(|bidx| self.run_batch(bidx, rsamples.as_ref()))
-            .collect();
+        let bat_results = (0..nbatches)
+            .map(|bidx| HelperT::batch_puc(self, bidx, rsamples.as_ref()))
+            .collect::<Result<Vec<_>>>();
         if any_of(bat_results.is_err(), self.mpi_ifx.comm()) {
             if let Err(err) = bat_results {
                 return Err(err);
@@ -247,7 +288,7 @@ impl<'a> LMRPUCWorkflow<'a> {
             Ok(vpair_reds) => {
                 let presults = PUCResults::merge(&vpair_reds);
                 println!("Z {}", presults.len());
-                save_puc(presults, self.mpi_ifx, &self.args.puc_file)?;
+                presults.save(self.mpi_ifx, &self.args.puc_file)?;
                 Ok(())
             }
             Err(err) => Err(err),

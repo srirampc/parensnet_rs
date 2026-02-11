@@ -394,7 +394,7 @@ where
         p_lookup
     }
 
-    fn prepare_serialize(&mut self, hist_dim: &[IntT], mcx: &CommIfx) {
+    fn fill_diag(&mut self, hist_dim: &[IntT], mcx: &CommIfx) {
         //  Initialize array with the allocated ordered pairs
         let brg = block_range(mcx.rank, mcx.size, self.nord_pairs);
         let about = brg.clone().map(|idx| idx / self.nvars).collect::<Vec<_>>();
@@ -407,7 +407,7 @@ where
         // Pairs Lookup
         let lookup = self.pairs_lookup();
         let si_slice = self.si.as_slice().unwrap();
-        let lmr_slice = self.si.as_slice().unwrap();
+        let lmr_slice = self.lmr.as_slice().unwrap();
 
         let mut sizes: Vec<IntT> = vec![IntT::default(); about.len()];
         let mut si: Vec<FloatT> = vec![FloatT::default(); n_si];
@@ -651,7 +651,7 @@ where
             v_siy.into_iter().flatten().collect();
         v_si.extend(v_siy);
         v_si.sort_by_key(|x| (x.about, x.by));
-        log::info!(
+        log::debug!(
             "At Rank {} Built {} MI and {} SI",
             wf.mpi_ifx.rank,
             v_pmi.len(),
@@ -728,25 +728,20 @@ where
         mpio::block_write1d(w.mpi_ifx, &data_group, "mi", &npairs_mi.mi)?;
         mpio::block_write1d(w.mpi_ifx, &data_group, "si", &npairs_si.si)?;
         mpio::block_write1d(w.mpi_ifx, &data_group, "lmr", &npairs_si.lmr)?;
-        //
         Ok(())
     }
 }
 
 impl<'a> MISIWorkFlow<'a> {
     pub fn run(&self) -> Result<()> {
+        type HelperT = MISIWorkFlowHelper<i64, i32, f32>;
         cond_info!(self.mpi_ifx.is_root(); "Starting MISIWorkFlow::Run");
-        let nodes = MISIWorkFlowHelper::<i64, i32, f32>::construct_nodes(
-            self,
-            self.mpi_ifx.rank,
-        )?;
+
+        let nodes = HelperT::construct_nodes(self, self.mpi_ifx.rank)?;
         cond_info!(self.mpi_ifx.is_root(); "Constructed Nodes: {}", nodes.len());
+
         let (npairs_si, npairs_mi) =
-            MISIWorkFlowHelper::<i64, i32, f32>::construct_node_pairs(
-                self,
-                self.mpi_ifx.rank,
-                &nodes,
-            )?;
+            HelperT::construct_node_pairs(self, self.mpi_ifx.rank, &nodes)?;
         if log::log_enabled!(log::Level::Info) {
             let n_mi =
                 allreduce_sum(&(npairs_mi.index.len()), self.mpi_ifx.comm());
@@ -756,6 +751,7 @@ impl<'a> MISIWorkFlow<'a> {
                 self.mpi_ifx.is_root(); "Constructed MI: {} SI: {}", n_mi, n_si
             );
         }
+
         let npairs_mi = npairs_mi.distribute(self.mpi_ifx)?;
         let mut npairs_si = npairs_si.distribute(self.mpi_ifx)?;
         if log::log_enabled!(log::Level::Info) {
@@ -767,9 +763,8 @@ impl<'a> MISIWorkFlow<'a> {
                 self.mpi_ifx.is_root(); "Distributed MI: {} SI: {}", n_mi, n_si
             );
         }
-        npairs_si
-            .prepare_serialize(nodes.hist_dim.as_slice().unwrap(), self.mpi_ifx);
 
+        npairs_si.fill_diag(nodes.hist_dim.as_slice().unwrap(), self.mpi_ifx);
         if log::log_enabled!(log::Level::Info) {
             let n_si =
                 allreduce_sum(&(npairs_si.about.len()), self.mpi_ifx.comm());
@@ -777,15 +772,14 @@ impl<'a> MISIWorkFlow<'a> {
                 self.mpi_ifx.is_root(); "Serialiaze Prep SI: {}", n_si
             );
         }
-        //println!("Done {}", node_pairs.len());
+
         if self.mpi_ifx.rank == 0 {
-            MISIWorkFlowHelper::<i64, i32, f32>::write_nodes_h5(self, &nodes)?;
+            HelperT::write_nodes_h5(self, &nodes)?;
         }
-        cond_info!(
-            self.mpi_ifx.is_root(); "Completed Writing Nodes"
-        );
+        cond_info!(self.mpi_ifx.is_root(); "Completed Writing Nodes");
+
         self.mpi_ifx.comm().barrier();
-        MISIWorkFlowHelper::<i64, i32, f32>::write_node_pairs(
+        HelperT::write_node_pairs(
             self, &npairs_si, &npairs_mi,
         )?;
         self.mpi_ifx.comm().barrier();

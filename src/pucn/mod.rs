@@ -18,7 +18,7 @@ use mpi::traits::{Communicator, Root};
 use ndarray::{Array1, Array2, Axis};
 use ndarray_rand::{RandomExt, SamplingStrategy};
 use num::{FromPrimitive, Integer, Zero};
-use std::ops::Range;
+use std::ops::{AddAssign, Range};
 use thiserror::Error;
 
 #[derive(Error, Debug)]
@@ -108,14 +108,19 @@ impl<T: Clone + Zero, S: Clone + Zero> IdVResults<T, S> {
     }
 }
 
-fn pair_indices(st_ranges: RangePair<usize>) -> Array2<i32> {
+fn pair_indices<T>(st_ranges: RangePair<usize>) -> Array2<T>
+where
+    T: Integer + AddAssign + FromPrimitive + Clone,
+{
     let (s_range, t_range) = st_ranges;
-    let (s_vec, t_vec): (Vec<i32>, Vec<i32>) = iproduct!(s_range, t_range)
+    let (s_vec, t_vec): (Vec<T>, Vec<T>) = iproduct!(s_range, t_range)
         .filter(|(src, tgt)| src < tgt)
-        .map(|(src, tgt)| (src as i32, tgt as i32))
+        .map(|(src, tgt)| {
+            (T::from_usize(src).unwrap(), T::from_usize(tgt).unwrap())
+        })
         .unzip();
 
-    let mut st_arr = Array2::<i32>::zeros((s_vec.len(), 2));
+    let mut st_arr = Array2::<T>::zeros((s_vec.len(), 2));
     st_arr
         .slice_mut(ndarray::s![.., 0])
         .assign(&Array1::from_vec(s_vec));
