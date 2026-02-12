@@ -673,11 +673,9 @@ mod tests {
 
     use super::{LMRDSPair, MISIPair, MISIRangePair};
     use crate::mvim::rv::{Error, MRVTrait};
-    use crate::test_data_file_path;
 
     lazy_static! {
-        static ref MISI_H5: &'static str =
-            test_data_file_path!("adata.20k.500.misidata.h5");
+        static ref MISI_H5: &'static str = crate::tests::test_misi_file();
         static ref PAIRS_LIST: Vec<(i32, i32)> =
             vec![(0, 1), (0, 2), (0, 3), (0, 4), (0, 5)];
         static ref PAIRS_MI_PUC: HashMap<(i32, i32), (f32, f32)> =

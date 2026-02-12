@@ -250,18 +250,18 @@ mod tests {
     #[test]
     pub fn test_parse_workflow_args() -> Result<()> {
         crate::tests::log_init();
-        match parse_wflow_cfg!("pbmc20k_500_lpuc.yml") {
+        match parse_wflow_cfg!("/pucn/pbmc20k_500_lpuc.yml") {
             Ok(wargs) => {
                 info!("Parsed successfully: {:?}", wargs);
                 assert_eq!(wargs.disc_method, DiscretizerMethod::BayesianBlocks);
-                assert_eq!(wargs.tbase, LogBase::Two);
+                assert_eq!(wargs.tbase, LogBase::Natural);
             }
             Err(e) => {
                 error!("Failed to parse YAML: {}", e);
             }
         };
 
-        match parse_wflow_cfg!("pbmc20k_500_S6x4p.yml") {
+        match parse_wflow_cfg!("/pucn/pbmc20k_500_S6x4p.yml") {
             Ok(p_wargs) => {
                 info!("Parsed successfully: {:?}", p_wargs);
                 assert_eq!(p_wargs.mode, vec![RunMode::SamplesLMRRanges]);
@@ -276,7 +276,7 @@ mod tests {
     pub fn test_parse_workflow_distr() -> Result<()> {
         let wargs = parse_wflow_cfg!("pbmc20k_500_S6x4p.yml").unwrap();
         let wdistr = WorkDistributor::new(wargs.nvars, wargs.npairs, 2, 16);
-        info!("Work Distribution : {:?}", wdistr.pairs2d);
+        debug!("Work Distribution : {:?}", wdistr.pairs2d);
         Ok(())
     }
 

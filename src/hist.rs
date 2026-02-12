@@ -214,7 +214,7 @@ mod tests {
     use anyhow::Result;
     use itertools::Itertools;
     use lazy_static::lazy_static;
-    use log::{debug, info};
+    use log::debug;
     use ndarray::Array1;
 
     lazy_static! {
@@ -231,16 +231,16 @@ mod tests {
         for colx in 0..4 {
             // let datand = Array2::from(tdata.data);
             //println!("JDATA:: {:?}", tdata.data.column(0));
-            info!("COLUMN : {}", colx);
-            info!(" ->JBINS : {:?}", HIST_DATA.nodes[colx].bins);
-            info!(" ->JHIST : {:?}", HIST_DATA.nodes[colx].hist);
+            debug!("COLUMN : {}", colx);
+            debug!(" ->JBINS : {:?}", HIST_DATA.nodes[colx].bins);
+            debug!(" ->JHIST : {:?}", HIST_DATA.nodes[colx].hist);
             let rbins = bayesian_blocks_bin_edges(HIST_DATA.data.column(colx));
-            info!(" ->RBINS : {:?}", rbins);
+            debug!(" ->RBINS : {:?}", rbins);
             let thist: Array1<u32> = histogram_1d(
                 HIST_DATA.data.column(colx),
                 rbins.as_slice().unwrap(),
             );
-            info!(" ->THIST : {:?}", thist);
+            debug!(" ->THIST : {:?}", thist);
             assert_eq!(HIST_DATA.nodes[colx].hist, thist.to_vec());
         }
     }
@@ -282,7 +282,7 @@ mod tests {
                 let (dxy_hist, dx_hist, dy_hist) = px_data.get_hist(nobs, x, y);
                 let (xy_jhist, x_hist, y_hist) = bb_joint_histogram(
                     ematrix.column(x).view(),
-                    ematrix.column(x).view(),
+                    ematrix.column(y).view(),
                 );
                 debug!(
                     "X,Y: {:?} ; dims  {:?} ; bayesian blocks dim {:?}",
@@ -291,9 +291,9 @@ mod tests {
                     (x_hist.len(), y_hist.len())
                 );
                 debug!(
-                    " --> jhist : {:?}; phist : {:?} Diff : {}",
-                    (x_hist.shape(), y_hist.shape(), xy_jhist.shape(),),
-                    dxy_hist.t().shape(),
+                    " --> in_hist : {:?}; joint_hist : {:?} Diff : {}",
+                    (x_hist.shape(), y_hist.shape()),
+                    (xy_jhist.shape(), dxy_hist.t().shape()),
                     xy_jhist.abs_diff_eq(&dxy_hist.t(), 1e-3)
                 );
                 assert!(xy_jhist.abs_diff_eq(&dxy_hist.t(), 1e-3));

@@ -652,7 +652,7 @@ pub fn read_csv_column(f_csv: &str, column: &str) -> Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use anyhow::Result;
-    use log::{debug, info};
+    use log::debug;
     use ndarray::Array1;
 
     use crate::util::{BatchBlocks2D, RangePair, SeqBatchBlocks2D};
@@ -686,8 +686,8 @@ mod tests {
 
         let nrdva = around(va.view(), 2);
         let nrdvb = around(vb.view(), 2);
-        info!("NRDA {:8.4}", nrdva);
-        info!("NRDB {:8.4}", nrdvb);
+        debug!("NRDA {:8.4}", nrdva);
+        debug!("NRDB {:8.4}", nrdvb);
 
         assert_eq!(nrdva, expected_nrda);
         assert_eq!(nrdvb, expected_nrdb);
@@ -763,9 +763,8 @@ mod tests {
     fn test_read_csv() -> Result<()> {
         crate::tests::log_init();
         use super::read_csv_column;
-        use crate::test_data_file_path;
 
-        let tf_csv = test_data_file_path!("/pbmc/trrust_tf.txt");
+        let tf_csv = crate::tests::test_tf_file();
         let csv_strs = read_csv_column(tf_csv, "gene")?;
 
         debug!("V: {}", csv_strs.len());
@@ -778,18 +777,6 @@ mod tests {
             csv_strs[2857..],
             vec!["ZNF444", "ZNF652", "ZNF750", "ZNF76", "ZNRD1"]
         );
-        //let csv_strs2 = read_csv_column_pandas(tf_csv, "gene")?;
-        //debug!("V: {}", csv_strs2.len());
-        //assert_eq!(csv_strs2.len(), 2862);
-        //assert_eq!(
-        //    csv_strs2[..5],
-        //    vec!["A2M", "AATF", "ABCA1", "ABCA3", "ABCB1"]
-        //);
-
-        //assert_eq!(
-        //    csv_strs2[2857..],
-        //    vec!["ZNF444", "ZNF652", "ZNF750", "ZNF76", "ZNRD1"]
-        //);
 
         Ok(())
     }

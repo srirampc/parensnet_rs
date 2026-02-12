@@ -23,7 +23,7 @@ mod tests {
     #[macro_export]
     macro_rules! test_config_file_path {
         ($name:literal) => {
-            concat!(env!("CARGO_MANIFEST_DIR"), "/config/test/", $name)
+            concat!(env!("CARGO_MANIFEST_DIR"), "/config/", $name)
         };
     }
 
@@ -31,6 +31,13 @@ mod tests {
     macro_rules! test_data_file_path {
         ($name:literal) => {
             concat!(env!("CARGO_MANIFEST_DIR"), "/data/", $name)
+        };
+    }
+
+    #[macro_export]
+    macro_rules! test_ut_data_file_path {
+        ($name:literal) => {
+            concat!(env!("CARGO_MANIFEST_DIR"), "/data/unit_tests/", $name)
         };
     }
 
@@ -144,34 +151,44 @@ mod tests {
 
     #[allow(dead_code)]
     pub fn puc_test_data() -> Result<PUCTestData> {
-        parse_gz_test_data(test_data_file_path!("puc_data_small.json.gz"))
+        parse_gz_test_data(test_ut_data_file_path!("puc_data_small.json.gz"))
     }
 
     #[allow(dead_code)]
     pub fn puc_test4_data() -> Result<PUCTestData> {
-        parse_gz_test_data(test_data_file_path!("puc_data4_small.json.gz"))
+        parse_gz_test_data(test_ut_data_file_path!("puc_data4_small.json.gz"))
     }
 
     #[allow(dead_code)]
     pub fn puc_test4_data_w_lmr() -> Result<PUCTestData> {
-        parse_gz_test_data(test_data_file_path!("puc_data4_w_lmr_small.json.gz"))
+        parse_gz_test_data(test_ut_data_file_path!("puc_data4_w_lmr_small.json.gz"))
     }
     #[allow(dead_code)]
     pub fn hist_test_data() -> Result<HistTestData> {
-        parse_gz_test_data(test_data_file_path!("bbh_test.json.gz"))
+        parse_gz_test_data(test_ut_data_file_path!("bbh_test.json.gz"))
     }
 
     #[allow(dead_code)]
     pub fn hist_large_test_data() -> Result<HistTestData> {
-        parse_gz_test_data(test_data_file_path!("bbh_large_test.json.gz"))
+        parse_gz_test_data(test_ut_data_file_path!("bbh_large_test.json.gz"))
     }
 
     #[allow(dead_code)]
     pub fn test_exp_matrix() -> Result<Array2<f32>, hdf5::Error> {
         crate::h5::io::read_2d::<f32>(
-            test_data_file_path!("d800k_3genes.h5"),
+            test_ut_data_file_path!("d800k_3genes.h5"),
             "X",
         )
+    }
+
+    #[allow(dead_code)]
+    pub fn test_tf_file() -> &'static str {
+        test_data_file_path!("/pbmc/trrust_tf.txt")
+    }
+
+    #[allow(dead_code)]
+    pub fn test_misi_file() -> &'static str {
+        test_data_file_path!("/pbmc/adata.20k.500.misidata.h5")
     }
 
     #[allow(dead_code)]
@@ -180,7 +197,7 @@ mod tests {
         cols: Range<usize>,
     ) -> Result<Array2<f32>, hdf5::Error> {
         crate::h5::io::read2d_slice::<f32, usize>(
-            test_data_file_path!("d800k_3genes.h5"),
+            test_ut_data_file_path!("d800k_3genes.h5"),
             "X",
             &rows,
             &cols,
