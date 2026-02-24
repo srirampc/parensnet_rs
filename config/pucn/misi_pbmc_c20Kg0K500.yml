@@ -1,7 +1,7 @@
-h5ad_file: "/localscratch/schockalingam6/tmp/pbmc20k.500/adata.20k.500.h5ad"
-misi_data_file: "tmp/adata.20k.500.misidata.h5"
-puc_file: "tmp/adata.20k.500.lmr_puc.h5"
-pidc_file: "tmp/adata.20k.500.lmr_pidc.h5"
+h5ad_file: "./data/pbmc_scrna/0020K/adata.20K.0K500.h5ad"
+misi_data_file: "./out/adata.20k.500.misidata.h5"
+puc_file: "./out/adata.20k.500.lmr_puc.h5"
+pidc_file: "./out/adata.20k.500.lmr_pidc.h5"
 #
 nrounds: 0
 nsamples: 0

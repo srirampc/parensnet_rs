@@ -5,8 +5,8 @@ use ndarray::{Array1, Array2, ArrayView1};
 use num::{FromPrimitive, ToPrimitive};
 use sope::{
     collective::{all2all_vec, all2allv_vec, allgatherv_full_vec},
-    cond_info,
     reduction::allreduce_sum,
+    timer::{SectionTimer},
     util::exc_prefix_sum,
 };
 use std::{
@@ -17,6 +17,8 @@ use super::{WorkDistributor, WorkflowArgs};
 use crate::{
     anndata::AnnData,
     comm::CommIfx,
+    cond_info, 
+    cond_debug,
     h5::{io, mpio},
     hist::{HSFloat, bayesian_blocks_bin_edges, histogram_1d, histogram_2d},
     mvim::imeasures::{
@@ -525,9 +527,9 @@ where
             &var_data,
             wf.mpi_ifx.comm(),
         )?;
-        if log::log_enabled!(log::Level::Info) {
+        if log::log_enabled!(log::Level::Debug) {
             wf.mpi_ifx.comm().barrier();
-            cond_info!(wf.mpi_ifx.is_root(); "Constructed {} Nodes", nodes.len());
+            cond_debug!(wf.mpi_ifx.is_root(); "Collected {} Nodes", nodes.len());
         }
         Ok(nodes)
     }
@@ -652,17 +654,17 @@ where
         v_si.extend(v_siy);
         v_si.sort_by_key(|x| (x.about, x.by));
         log::debug!(
-            "At Rank {} Built {} MI and {} SI",
+            "At Rank {} :: Built MI {} and SI {}",
             wf.mpi_ifx.rank,
             v_pmi.len(),
             v_si.len()
         );
-        if log::log_enabled!(log::Level::Info) {
+        if log::log_enabled!(log::Level::Debug) {
             wf.mpi_ifx.comm().barrier();
             let n_mi = allreduce_sum(&(v_pmi.len()), wf.mpi_ifx.comm());
             let n_si = allreduce_sum(&(v_si.len()), wf.mpi_ifx.comm());
-            cond_info!(
-                wf.mpi_ifx.is_root(); "Built {} MI & {} SI", n_mi, n_si
+            cond_debug!(
+                wf.mpi_ifx.is_root(); "Built MI : {} & SI : {} ", n_mi, n_si
             );
         }
 
@@ -671,11 +673,11 @@ where
             &v_si,
         );
         let v_pmi = PairMICollection::<IntT, FloatT>::from_vec(&v_pmi);
-        if log::log_enabled!(log::Level::Info) {
+        if log::log_enabled!(log::Level::Debug) {
             wf.mpi_ifx.comm().barrier();
             let n_mi = allreduce_sum(&(v_pmi.index.len()), wf.mpi_ifx.comm());
             let n_si = allreduce_sum(&(v_si.about.len()), wf.mpi_ifx.comm());
-            cond_info!(
+            cond_debug!(
                 wf.mpi_ifx.is_root(); "Collected {} MI & {} SI", n_mi, n_si
             );
         }
@@ -735,55 +737,82 @@ where
 impl<'a> MISIWorkFlow<'a> {
     pub fn run(&self) -> Result<()> {
         type HelperT = MISIWorkFlowHelper<i64, i32, f32>;
+        let mut s_timer = SectionTimer::from_comm(self.mpi_ifx.comm(), ",");
         cond_info!(self.mpi_ifx.is_root(); "Starting MISIWorkFlow::Run");
 
         let nodes = HelperT::construct_nodes(self, self.mpi_ifx.rank)?;
-        cond_info!(self.mpi_ifx.is_root(); "Constructed Nodes: {}", nodes.len());
+        if log::log_enabled!(log::Level::Info) {
+            s_timer.info_section("Construct Nodes");
+            cond_info!(
+                self.mpi_ifx.is_root(); 
+                "Nodes Constructed: {} w. {}", nodes.len(), nodes.bin_dim.len()
+            );
+            s_timer.reset();
+        }
 
         let (npairs_si, npairs_mi) =
             HelperT::construct_node_pairs(self, self.mpi_ifx.rank, &nodes)?;
         if log::log_enabled!(log::Level::Info) {
+            s_timer.info_section("Construct Node Pairs");
             let n_mi =
                 allreduce_sum(&(npairs_mi.index.len()), self.mpi_ifx.comm());
             let n_si =
                 allreduce_sum(&(npairs_si.about.len()), self.mpi_ifx.comm());
+            self.mpi_ifx.comm().barrier();
             cond_info!(
-                self.mpi_ifx.is_root(); "Constructed MI: {} SI: {}", n_mi, n_si
+                self.mpi_ifx.is_root(); "MI Size: {} SI Size: {}", n_mi, n_si
             );
+            s_timer.reset();
         }
 
         let npairs_mi = npairs_mi.distribute(self.mpi_ifx)?;
-        let mut npairs_si = npairs_si.distribute(self.mpi_ifx)?;
         if log::log_enabled!(log::Level::Info) {
+            s_timer.info_section("Node Pairs MI Distribution");
             let n_mi =
                 allreduce_sum(&(npairs_mi.index.len()), self.mpi_ifx.comm());
+            cond_info!(
+                self.mpi_ifx.is_root(); "Distributed MI: {} ", n_mi 
+            );
+            s_timer.reset();
+        }
+
+        let mut npairs_si = npairs_si.distribute(self.mpi_ifx)?;
+        if log::log_enabled!(log::Level::Info) {
+            s_timer.info_section("Node Pairs SI Distribution");
             let n_si =
                 allreduce_sum(&(npairs_si.about.len()), self.mpi_ifx.comm());
             cond_info!(
-                self.mpi_ifx.is_root(); "Distributed MI: {} SI: {}", n_mi, n_si
+                self.mpi_ifx.is_root(); "Distributed SI: {}", n_si
             );
+            s_timer.reset();
         }
 
         npairs_si.fill_diag(nodes.hist_dim.as_slice().unwrap(), self.mpi_ifx);
         if log::log_enabled!(log::Level::Info) {
+            s_timer.info_section("Serialize Peparation");
             let n_si =
                 allreduce_sum(&(npairs_si.about.len()), self.mpi_ifx.comm());
             cond_info!(
-                self.mpi_ifx.is_root(); "Serialiaze Prep SI: {}", n_si
+                self.mpi_ifx.is_root(); "Update SI for Serialization: {}", n_si
             );
+            s_timer.reset();
         }
 
         if self.mpi_ifx.rank == 0 {
             HelperT::write_nodes_h5(self, &nodes)?;
         }
-        cond_info!(self.mpi_ifx.is_root(); "Completed Writing Nodes");
+        if log::log_enabled!(log::Level::Info) {
+            s_timer.info_section("Write Nodes");
+            cond_info!(self.mpi_ifx.is_root(); "Completed Writing Nodes");
+            s_timer.reset();
+        }
 
         self.mpi_ifx.comm().barrier();
-        HelperT::write_node_pairs(
-            self, &npairs_si, &npairs_mi,
-        )?;
-        self.mpi_ifx.comm().barrier();
-        cond_info!(self.mpi_ifx.is_root(); "Finished MISIWorkFlow::Run");
+        HelperT::write_node_pairs(self, &npairs_si, &npairs_mi)?;
+        if log::log_enabled!(log::Level::Info) {
+            s_timer.info_section("Write Node Pairs");
+            cond_info!(self.mpi_ifx.is_root(); "Finished MISIWorkFlow::Run");
+        }
         Ok(())
     }
 }

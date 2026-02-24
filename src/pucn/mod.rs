@@ -23,7 +23,7 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum WorkflowError {
-    #[error("Error reading file (nvars:{0}, nrounds:{1}, nsamples:{2})")]
+    #[error("Invalid No. of Samples: (nvars:{0}, nrounds:{1}, nsamples:{2})")]
     InvalidSamples(usize, usize, usize),
 }
 

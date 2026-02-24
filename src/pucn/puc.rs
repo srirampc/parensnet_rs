@@ -19,7 +19,11 @@ use anyhow::{Result, anyhow};
 use hdf5::{Error as H5Error, H5Type};
 use mpi::traits::Equivalence;
 use ndarray::{Array1, Array2, ArrayView1};
-use sope::reduction::any_of;
+use sope::{
+    //collective::gather_one,
+    reduction::{allreduce_sum, any_of},
+    timer::SectionTimer,
+};
 
 pub type PUCResults<IntT, FloatT> = IdVResults<IntT, FloatT>;
 
@@ -143,7 +147,7 @@ impl<'a> SampledPUCWorkflow<'a> {
             Err(err) => {
                 cond_info!(
                     self.mpi_ifx.is_root();
-                    "{} No Samples; Running Full PUC", err
+                    "{} ; Running Full PUC", err
                 );
                 None
             }
@@ -248,6 +252,8 @@ impl<'a> LMRPUCWorkflow<'a> {
     pub fn run(&self) -> Result<()> {
         type HelperT = LMRWorkFlowHelper<i64, i32, f32>;
         type PT = PUCResults<i32, i64>;
+        let mut s_timer = SectionTimer::from_comm(self.mpi_ifx.comm(), ",");
+
         let nbatches = self.wdistr.pairs_2d().num_batches();
         let rsamples = match collect_samples::<i32>(
             self.mpi_ifx,
@@ -270,10 +276,37 @@ impl<'a> LMRPUCWorkflow<'a> {
                 None
             }
         };
+        if log::log_enabled!(log::Level::Info) {
+            s_timer.info_section("Collect Samples");
+            cond_info!(
+                self.mpi_ifx.is_root();
+                "Samples: {:?}", rsamples.as_ref().map(|x| x.shape())
+            );
+            s_timer.reset();
+        }
 
         let bat_results = (0..nbatches)
             .map(|bidx| HelperT::batch_puc(self, bidx, rsamples.as_ref()))
             .collect::<Result<Vec<_>>>();
+        if log::log_enabled!(log::Level::Info) {
+            s_timer.info_section("Compute PUC");
+            let n_batches =
+                bat_results.as_ref().map(|x| x.len()).unwrap_or_default();
+            let n_vpuc = bat_results
+                .as_ref()
+                .map(|x| x.iter().map(|y| y.len()).sum::<usize>())
+                .unwrap_or_default();
+            let n_batches = allreduce_sum(&n_batches, self.mpi_ifx.comm());
+            let n_vpuc = allreduce_sum(&n_vpuc, self.mpi_ifx.comm());
+            // let nv =
+            //    gather_one(&n_vpuc, 0, wf.mpi_ifx.comm())?.unwrap_or_default();
+            cond_info!(
+                self.mpi_ifx.is_root();
+                "Batches Completed. NBATCHES: {} NPUC: {}", n_batches, n_vpuc
+            );
+            s_timer.reset();
+        }
+
         if any_of(bat_results.is_err(), self.mpi_ifx.comm()) {
             if let Err(err) = bat_results {
                 return Err(err);
@@ -283,17 +316,21 @@ impl<'a> LMRPUCWorkflow<'a> {
                 ));
             }
         }
-
-        match bat_results {
-            Ok(vpair_reds) => {
-                let presults = PUCResults::merge(&vpair_reds);
-                println!("Z {}", presults.len());
-                presults.save(self.mpi_ifx, &self.args.puc_file)?;
-                Ok(())
-            }
-            Err(err) => Err(err),
+        let bat_results = bat_results.unwrap_or_default();
+        let m_results = PUCResults::merge(&bat_results);
+        if log::log_enabled!(log::Level::Info) {
+            s_timer.info_section("Merge Results");
+            let n_vpuc = allreduce_sum(&(m_results.len()), self.mpi_ifx.comm());
+            cond_info!(
+                self.mpi_ifx.is_root();
+                "Merged Completed : {}", n_vpuc
+            );
+            s_timer.reset();
         }
-        //Ok(())
+        m_results.save(self.mpi_ifx, &self.args.puc_file)?;
+        //
+        s_timer.info_section("Save PUC Pairs");
+        Ok(())
     }
 }
 

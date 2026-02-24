@@ -1,0 +1,16 @@
+h5ad_file: "./data/pbmc_scrna/0020K/adata.20K.5K.h5ad"
+misi_data_file: "/storage/home/hcoda1/0/schockalingam6/scratch/adata.20K.5K.misidata.h5"
+puc_file: "/storage/home/hcoda1/0/schockalingam6/scratch/adata.20K.5K.lmr_puc.h5"
+pidc_file: "/storage/home/hcoda1/0/schockalingam6/scratch/adata.20K.5K.lmr_pidc.h5"
+#
+nrounds: 0
+nsamples: 0
+nobs: 0
+nvars: 0
+mode:
+  - misi
+  #- "samples_ranges"
+  #- "puc2pidc"
+tbase: "e"
+save_nodes: False
+save_node_pairs: True
