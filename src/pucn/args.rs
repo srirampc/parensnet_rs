@@ -41,6 +41,8 @@ pub enum LogLevel {
 pub enum RunMode {
     #[serde(alias = "misi")]
     MISI,
+    #[serde(alias = "misi_dist")]
+    MISIDist,
     #[serde(alias = "sampled_puc_pairs")]
     SampledPUCPairs,
     #[serde(alias = "samples_ranges")]
@@ -55,6 +57,8 @@ pub enum RunMode {
     PUCRanges,
     #[serde(alias = "puc_lmr")]
     PUCLMR,
+    #[serde(alias = "puc_lmr_dist")]
+    PUCLMRDist,
     #[serde(alias = "puc2pidc")]
     PUC2PIDC,
     #[serde(alias = "puc_union")]

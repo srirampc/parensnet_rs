@@ -251,17 +251,17 @@ where
     T: Zero + PartialOrd + ToPrimitive,
     S: FromPrimitive,
 {
-    debug_assert!(n > T::zero());
-    debug_assert!(k < n);
+    let (un, uk) = (n.to_i64().unwrap(), k.to_i64().unwrap());
+    debug_assert!(un > 0);
+    debug_assert!(uk < (un * (un - 1)) / 2);
 
-    let (un, uk) = (n.to_usize().unwrap(), k.to_usize().unwrap());
     let ctfk = uk as f64;
     let i = un
         - 2
         - ((-8.0 * ctfk + (4 * un * (un - 1) - 7) as f64).sqrt() / 2.0 - 0.5)
-            as usize;
+            as i64;
     let j = uk + i + 1 - (un * (un - 1) / 2) + ((un - i) * ((un - i) - 1) / 2);
-    (S::from_usize(i).unwrap(), S::from_usize(j).unwrap())
+    (S::from_i64(i).unwrap(), S::from_i64(j).unwrap())
 }
 
 //
@@ -656,6 +656,20 @@ mod tests {
     use ndarray::Array1;
 
     use crate::util::{BatchBlocks2D, RangePair, SeqBatchBlocks2D};
+    #[test]
+    pub fn test_triu_index() {
+        use super::{triu_index_to_pair, triu_pair_to_index};
+        crate::tests::log_init();
+        let n = 500;
+        for i in 0..6 {
+            for j in (i+1)..6 {
+                let rk = triu_pair_to_index(n, i, j);
+                let ix: (usize, usize) = triu_index_to_pair(n, rk);
+                debug!("{} {} {} {:?}", i, j, rk, ix)
+            }
+        }
+    }
+
     #[test]
     pub fn test_around() {
         use super::around;

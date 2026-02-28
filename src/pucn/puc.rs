@@ -1,5 +1,3 @@
-use std::marker::PhantomData;
-
 use super::{
     IdVResults, WorkDistributor, WorkflowArgs, collect_samples, pair_indices,
 };
@@ -20,10 +18,10 @@ use hdf5::{Error as H5Error, H5Type};
 use mpi::traits::Equivalence;
 use ndarray::{Array1, Array2, ArrayView1};
 use sope::{
-    //collective::gather_one,
     reduction::{allreduce_sum, any_of},
     timer::SectionTimer,
 };
+use std::marker::PhantomData;
 
 pub type PUCResults<IntT, FloatT> = IdVResults<IntT, FloatT>;
 

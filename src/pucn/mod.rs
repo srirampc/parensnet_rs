@@ -2,6 +2,7 @@
 mod args;
 mod misiw;
 mod puc;
+mod puc_dist;
 pub use self::args::{RunMode, WorkflowArgs};
 
 use crate::{
@@ -211,6 +212,13 @@ pub fn execute_workflow(mpi_ifx: &CommIfx, args: &WorkflowArgs) -> Result<()> {
                 let lpuc = puc::LMRPUCWorkflow {
                     args,
                     wdistr: &wdistr,
+                    mpi_ifx,
+                };
+                lpuc.run()?;
+            }
+            RunMode::PUCLMRDist => {
+                let lpuc = puc_dist::PUCDistWorkflow {
+                    args,
                     mpi_ifx,
                 };
                 lpuc.run()?;

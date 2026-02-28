@@ -6,7 +6,7 @@ use num::{FromPrimitive, ToPrimitive};
 use sope::{
     collective::{all2all_vec, all2allv_vec, allgatherv_full_vec},
     reduction::allreduce_sum,
-    timer::{SectionTimer},
+    timer::SectionTimer,
     util::exc_prefix_sum,
 };
 use std::{
@@ -17,10 +17,10 @@ use super::{WorkDistributor, WorkflowArgs};
 use crate::{
     anndata::AnnData,
     comm::CommIfx,
-    cond_info, 
-    cond_debug,
+    cond_debug, cond_info,
     h5::{io, mpio},
     hist::{HSFloat, bayesian_blocks_bin_edges, histogram_1d, histogram_2d},
+    map_with_result_to_tuple,
     mvim::imeasures::{
         lmr_about_x_from_lvji, lmr_about_y_from_lvji, log_jvi_ratio,
         mi_from_ljvi, si_from_ljvi,
@@ -148,6 +148,47 @@ impl<SizeT, IntT, FloatT> NodeCollection<SizeT, IntT, FloatT> {
             abins: Array1::from_vec(vbins),
             ahist: Array1::from_vec(vhist),
             nsi: SizeT::from_usize(nsi).unwrap(),
+        })
+    }
+
+    fn from_h5(h5_file: &str) -> Result<Self>
+    where
+        SizeT: H5Type,
+        IntT: H5Type,
+        FloatT: H5Type,
+    {
+        let file = hdf5::File::open(h5_file)?;
+        let data_g = file.group("data")?;
+        // attributes
+        let (_nobs, _nvars, nsi) = map_with_result_to_tuple![
+            |x| io::read_scalar_attr::<SizeT>(&data_g, x) ;
+            "nobs", "nvars", "nsi"
+        ];
+
+        let (hist_start, bin_start, si_start) = map_with_result_to_tuple![
+            |x| data_g.dataset(x)?.read_1d::<SizeT>();
+           "hist_start", "bins_start", "si_start"
+        ];
+
+        let (hist_dim, bin_dim) = map_with_result_to_tuple![
+            |x| data_g.dataset(x)?.read_1d::<IntT>();
+           "hist_dim", "bins_dim"
+        ];
+
+        let (ahist, abins) = map_with_result_to_tuple![
+            |x| data_g.dataset(x)?.read_1d::<FloatT>();
+           "hist", "bins"
+        ];
+
+        Ok(Self {
+            hist_dim,
+            hist_start,
+            bin_dim,
+            bin_start,
+            si_start,
+            nsi,
+            ahist,
+            abins,
         })
     }
 
@@ -744,7 +785,7 @@ impl<'a> MISIWorkFlow<'a> {
         if log::log_enabled!(log::Level::Info) {
             s_timer.info_section("Construct Nodes");
             cond_info!(
-                self.mpi_ifx.is_root(); 
+                self.mpi_ifx.is_root();
                 "Nodes Constructed: {} w. {}", nodes.len(), nodes.bin_dim.len()
             );
             s_timer.reset();
@@ -771,7 +812,7 @@ impl<'a> MISIWorkFlow<'a> {
             let n_mi =
                 allreduce_sum(&(npairs_mi.index.len()), self.mpi_ifx.comm());
             cond_info!(
-                self.mpi_ifx.is_root(); "Distributed MI: {} ", n_mi 
+                self.mpi_ifx.is_root(); "Distributed MI: {} ", n_mi
             );
             s_timer.reset();
         }
@@ -813,6 +854,22 @@ impl<'a> MISIWorkFlow<'a> {
             s_timer.info_section("Write Node Pairs");
             cond_info!(self.mpi_ifx.is_root(); "Finished MISIWorkFlow::Run");
         }
+        Ok(())
+    }
+
+    pub fn run_flat(&self) -> Result<()> {
+        type HelperT = MISIWorkFlowHelper<i64, i32, f32>;
+        // 1. Flat loading of  all the nodes
+        let _nodes =
+            NodeCollection::<i64, i32, f32>::from_h5(&self.args.misi_data_file)?;
+        // 2. Load ljvi start in distributed manner
+        let _jv_start: Array1<i64> = mpio::block_read1d(
+            self.mpi_ifx,
+            &self.args.misi_data_file,
+            "jvi_start",
+            None,
+        )?;
+        // TODO::
         Ok(())
     }
 }

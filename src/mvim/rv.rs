@@ -5,7 +5,7 @@ use std::rc::Rc;
 
 use crate::{
     mvim::imeasures::{self, redundancy},
-    types::{PNInteger, PNFloat},
+    types::{PNFloat, PNInteger},
 };
 
 #[derive(Debug)]
@@ -266,7 +266,11 @@ pub trait MRVTrait<IntT: 'static + PNInteger, FloatT: 'static + PNFloat> {
         Ok(self.minsum_list(about, target)?.sum())
     }
 
-    fn get_puc_factor(&self, _about: IntT, _target: IntT) -> Result<FloatT, Error> {
+    fn get_puc_factor(
+        &self,
+        _about: IntT,
+        _target: IntT,
+    ) -> Result<FloatT, Error> {
         Ok(FloatT::from_usize(self.nvariables() - 2).unwrap())
     }
 
@@ -280,35 +284,57 @@ pub trait MRVTrait<IntT: 'static + PNInteger, FloatT: 'static + PNFloat> {
         Ok((pij_factor - (self.get_lmr_minsum(i, j)? / mij))
             + (pji_factor - (self.get_lmr_minsum(j, i)? / mij)))
     }
-
-    //
-    // def get_lmr_minsum(self, about:int, target:int) -> FloatT:
-    //     by_nodes: list[int] = list(
-    //         x for x in range(self.nvariables) if x != about and x != target
-    //     )
-    //     lmr_abtgt = self.get_lmr(about=about, by=target)
-    //     min_sum_list = np.array([
-    //         np.sum(np.minimum(lmr_abtgt, self.get_lmr(about=about, by=by)))
-    //         for by in by_nodes
-    //     ], self.float_dtype())
-    //     return np.sum(min_sum_list)
-
-    // def get_puc_factor(self, about: int, target:int): # pyright: ignore[reportUnusedParameter]
-    //     return np.float32(self.nvariables - 2).astype(self.float_dtype())
-
-    // def compute_lmr_puc(self, i:int, j:int):
-    //     mij = self.get_mi(i, j)
-    //     if mij == 0:
-    //         return np.float32(0.0).astype(self.float_dtype())
-    //     mi_factor = self.get_puc_factor(i, j)
-    //     return (
-    //         ( mi_factor - (self.get_lmr_minsum(i, j) / mij) ) +
-    //         ( mi_factor - (self.get_lmr_minsum(j, i) / mij) )
-    //     )
 }
 
 //
-// Struct containing sorted lmr arrays
+// Struct containing sorted lmr array for a given (about, random state)
+//
+struct UnitLMRSA<IntT, FloatT>
+where
+    IntT: 'static + PNInteger,
+    FloatT: 'static + PNFloat,
+{
+    about: IntT,
+    rstate: IntT,
+    sorted: Array1<FloatT>,
+    pfxsum: Array1<FloatT>,
+    rank: Array1<IntT>,
+}
+
+impl<IntT, FloatT> UnitLMRSA<IntT, FloatT>
+where
+    IntT: 'static + PNInteger,
+    FloatT: 'static + PNFloat,
+{
+    pub fn from_slice(about: IntT, rstate: IntT, lmr: &[FloatT]) -> Self {
+        let nvars = lmr.len();
+
+        let mut si_vec: Vec<(FloatT, IntT)> =
+            lmr.iter().enumerate().map(|(vidx, y)|{
+                let by_var = IntT::from_usize(vidx).unwrap();
+                (*y, by_var)
+            }).collect();
+        si_vec.sort_by(|(fa, _ia), (fb, _ib)| fa.total_cmp(fb));
+
+        let mut curr_sum = FloatT::zero();
+        let mut sorted: Array1<FloatT> = Array1::from_elem(nvars, FloatT::zero());
+        let mut pfxsum: Array1<FloatT> = Array1::from_elem(nvars, FloatT::zero());
+        let mut rank: Array1<IntT> = Array1::from_elem(nvars, IntT::zero());
+        for (ix, (svx, by_var)) in si_vec.iter().enumerate() {
+            let by_idx = by_var.to_usize().unwrap();
+            curr_sum += *svx;
+            rank[by_idx] = IntT::from_usize(ix).unwrap();
+            sorted[ix] = *svx;
+            pfxsum[ix] = curr_sum;
+        }
+        Self { about, rstate, sorted, pfxsum, rank }
+    }
+}
+
+
+
+//
+// Struct containing sorted lmr arrays for a given about
 //
 pub struct LMRSA<IntT, FloatT>
 where
@@ -346,13 +372,22 @@ where
                 siv_lst[rstate][vidx] = (lmr_ax[rstate], by_var)
             }
         }
-        for si_vec in siv_lst.iter_mut() {
+        Self::from_siv_list(&mut siv_lst, size, nvars, dim)
+    }
+
+    pub fn from_siv_list(
+        siv_list: &mut [Vec<(FloatT, IntT)>],
+        size: usize,
+        nvars: usize,
+        dim: usize,
+    ) -> Result<Self, Error> {
+        for si_vec in siv_list.iter_mut() {
             si_vec.sort_by(|(fa, _ia), (fb, _ib)| fa.total_cmp(fb));
         }
         let mut sorted: Array1<FloatT> = Array1::from_elem(size, FloatT::zero());
         let mut pfxsum: Array1<FloatT> = Array1::from_elem(size, FloatT::zero());
         let mut rank: Array1<IntT> = Array1::from_elem(size, IntT::zero());
-        for (rstate, si_vec) in siv_lst.iter().enumerate() {
+        for (rstate, si_vec) in siv_list.iter().enumerate() {
             let rsbegin = rstate * nvars;
             let mut curr_sum = FloatT::zero();
             for (ix, (svx, by_var)) in si_vec.iter().enumerate() {
@@ -372,6 +407,27 @@ where
             pfxsum,
             rank,
         })
+    }
+
+    pub fn from_lmr_slice(
+        dim: IntT,
+        nvars: usize,
+        lmr: &[FloatT],
+    ) -> Result<Self, Error> {
+        let size = lmr.len();
+        let dim = dim.to_usize().unwrap();
+        assert!(lmr.len() == dim * nvars);
+        let mut siv_lst: Vec<Vec<(FloatT, IntT)>> =
+            vec![vec![(FloatT::zero(), IntT::zero()); nvars]; dim];
+        for vidx in 0..nvars {
+            let by_var = IntT::from_usize(vidx).unwrap();
+            let lmr_ax = &lmr[(vidx * dim)..((vidx+1) * dim)];
+            for rstate in 0..dim {
+                siv_lst[rstate][vidx] = (lmr_ax[rstate], by_var)
+            }
+        }
+
+        Self::from_siv_list(&mut siv_lst, size, nvars, dim)
     }
 
     pub fn from_subset_map(
