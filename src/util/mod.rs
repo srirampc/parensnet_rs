@@ -224,13 +224,18 @@ where
     S: Zero + PartialOrd + ToPrimitive,
 {
     debug_assert!(n > T::zero());
-    debug_assert!(i >= S::zero() && i < j);
+    debug_assert!(i >= S::zero());
+    debug_assert!(j >= S::zero());
+    debug_assert!(i < j);
 
     let (nux, iux, jux) = (
         n.to_usize().unwrap(),
         i.to_usize().unwrap(),
         j.to_usize().unwrap(),
     );
+
+    debug_assert!(iux < nux);
+    debug_assert!(jux < nux);
 
     let idx = iux * nux + jux - (((iux + 2) * (iux + 1)) / 2);
     T::from_usize(idx).unwrap()

@@ -289,13 +289,13 @@ pub trait MRVTrait<IntT: 'static + PNInteger, FloatT: 'static + PNFloat> {
 //
 // Struct containing sorted lmr array for a given (about, random state)
 //
-struct UnitLMRSA<IntT, FloatT>
+pub struct UnitLMRSA<IntT, FloatT>
 where
     IntT: 'static + PNInteger,
     FloatT: 'static + PNFloat,
 {
-    about: IntT,
-    rstate: IntT,
+    pub about: IntT,
+    pub rstate: IntT,
     sorted: Array1<FloatT>,
     pfxsum: Array1<FloatT>,
     rank: Array1<IntT>,
@@ -309,11 +309,14 @@ where
     pub fn from_slice(about: IntT, rstate: IntT, lmr: &[FloatT]) -> Self {
         let nvars = lmr.len();
 
-        let mut si_vec: Vec<(FloatT, IntT)> =
-            lmr.iter().enumerate().map(|(vidx, y)|{
+        let mut si_vec: Vec<(FloatT, IntT)> = lmr
+            .iter()
+            .enumerate()
+            .map(|(vidx, y)| {
                 let by_var = IntT::from_usize(vidx).unwrap();
                 (*y, by_var)
-            }).collect();
+            })
+            .collect();
         si_vec.sort_by(|(fa, _ia), (fb, _ib)| fa.total_cmp(fb));
 
         let mut curr_sum = FloatT::zero();
@@ -327,11 +330,30 @@ where
             sorted[ix] = *svx;
             pfxsum[ix] = curr_sum;
         }
-        Self { about, rstate, sorted, pfxsum, rank }
+        Self {
+            about,
+            rstate,
+            sorted,
+            pfxsum,
+            rank,
+        }
+    }
+
+    pub fn minsum_wsrc(&self, src_idx: usize) -> FloatT {
+        let mut rdsum = FloatT::zero();
+        let lmrank = self.rank[src_idx].to_usize().unwrap();
+        let lmv = self.sorted[lmrank];
+        let lmlow = if lmrank > 0 {
+            self.pfxsum[lmrank - 1]
+        } else {
+            FloatT::zero()
+        };
+        let lmhigh =
+            FloatT::from_usize(self.sorted.len() - 1 - lmrank).unwrap() * lmv;
+        rdsum += lmlow + lmhigh;
+        rdsum
     }
 }
-
-
 
 //
 // Struct containing sorted lmr arrays for a given about
@@ -421,7 +443,7 @@ where
             vec![vec![(FloatT::zero(), IntT::zero()); nvars]; dim];
         for vidx in 0..nvars {
             let by_var = IntT::from_usize(vidx).unwrap();
-            let lmr_ax = &lmr[(vidx * dim)..((vidx+1) * dim)];
+            let lmr_ax = &lmr[(vidx * dim)..((vidx + 1) * dim)];
             for rstate in 0..dim {
                 siv_lst[rstate][vidx] = (lmr_ax[rstate], by_var)
             }

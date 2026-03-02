@@ -1,4 +1,4 @@
-use super::WorkflowArgs;
+use super::{WorkflowArgs, puc::PUCRTrait, puc::PUCResults};
 use crate::{
     comm::CommIfx,
     cond_info,
@@ -11,25 +11,27 @@ use crate::{
 
 use anyhow::Result;
 use hdf5::{File, H5Type};
+use itertools::Itertools;
 use mpi::traits::Equivalence;
-use ndarray::Array1;
+use ndarray::{Array1, Array2};
+use num::ToPrimitive;
 use sope::{
     collective::{all2all_vec, all2allv_vec, allgather_one},
-    gather_debug, gather_info,
+    gather_debug,
     partition::{ArbitDist, Dist, InterleavedDist},
     timer::SectionTimer,
 };
 use std::{
     fmt::Display,
+    iter::zip,
     marker::PhantomData,
     ops::{Div, Range},
-    rc::Rc,
 };
 
-// Index lookups for SI an LMR arrays :
+// Index lookups for SI an LMR distributed scheme :
 //   Mapping between (about, by) pair and flat array index
 //   Next functions for iterations
-pub struct SILMRIndexLU {
+pub struct IndexLU {
     si_start: Vec<usize>,
     hist_dim: Vec<usize>,
     nvars: usize,
@@ -37,7 +39,7 @@ pub struct SILMRIndexLU {
     npairs: usize,
 }
 
-impl Display for SILMRIndexLU {
+impl Display for IndexLU {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -51,13 +53,13 @@ impl Display for SILMRIndexLU {
     }
 }
 
-impl SILMRIndexLU {
-    pub fn new<SizeT, IntT>(args: &WorkflowArgs) -> Result<Self>
+impl IndexLU {
+    pub fn new<SizeT, IntT>(misi_data_file: &str) -> Result<Self>
     where
-        SizeT: 'static + PNInteger + H5Type + Default + Equivalence,
-        IntT: PNInteger + H5Type + Default + Equivalence,
+        SizeT: ToPrimitive + H5Type,
+        IntT: ToPrimitive + H5Type,
     {
-        let fptr = File::open(&args.misi_data_file)?;
+        let fptr = File::open(misi_data_file)?;
         let data_g = fptr.group("data")?;
         let hist_dim: Vec<usize> = data_g
             .dataset("hist_dim")?
@@ -84,19 +86,20 @@ impl SILMRIndexLU {
         })
     }
 
-    fn start_idx(&self, (v_about, v_by): (usize, usize)) -> usize {
+    fn si_start_idx(&self, (v_about, v_by): (usize, usize)) -> usize {
         self.si_start[v_about] + v_by * self.hist_dim[v_about]
     }
 
-    fn end_idx(&self, (v_about, v_by): (usize, usize)) -> usize {
+    fn si_end_idx(&self, (v_about, v_by): (usize, usize)) -> usize {
         self.si_start[v_about] + (v_by + 1) * self.hist_dim[v_about]
     }
 
-    fn var_bounds(&self, v_about: usize) -> Range<usize> {
-        self.start_idx((v_about, 0))..self.end_idx((v_about, self.nvars - 1))
+    fn si_var_bounds(&self, v_about: usize) -> Range<usize> {
+        self.si_start_idx((v_about, 0))
+            ..self.si_end_idx((v_about, self.nvars - 1))
     }
 
-    fn about(&self, idx: usize) -> usize {
+    fn si_about(&self, idx: usize) -> usize {
         let var = self.si_start.partition_point(|&x| x <= idx);
         if var == 0 {
             0
@@ -108,7 +111,7 @@ impl SILMRIndexLU {
         }
     }
 
-    fn by(&self, idx: usize, about: usize) -> usize {
+    fn si_by(&self, idx: usize, about: usize) -> usize {
         assert!(about < self.si_start.len());
         assert!(idx >= self.si_start[about]);
         let (abt_start, abt_dim) = (self.si_start[about], self.hist_dim[about]);
@@ -117,21 +120,115 @@ impl SILMRIndexLU {
         si_surplus.div(abt_dim).min(self.si_start.len() - 1)
     }
 
-    fn index2pair(&self, idx: usize) -> (usize, usize) {
-        let sabt = self.about(idx);
-        (sabt, self.by(idx, sabt))
+    fn si_index2pair(&self, idx: usize) -> (usize, usize) {
+        let sabt = self.si_about(idx);
+        (sabt, self.si_by(idx, sabt))
     }
 
-    fn next_to(&self, (about, by): (usize, usize)) -> (usize, usize) {
+    fn mi_index2pair(&self, idx: usize) -> (usize, usize) {
+        triu_index_to_pair(self.nvars, idx)
+    }
+
+    fn si_next_to(&self, (about, by): (usize, usize)) -> (usize, usize) {
         if by == self.nvars - 1 {
             (about + 1, 0)
         } else {
             (about, by + 1)
         }
     }
+
+    fn mi_next_to(&self, (x, y): (usize, usize)) -> (usize, usize) {
+        if y == self.nvars - 1 {
+            (x + 1, x + 2)
+        } else {
+            (x, y + 1)
+        }
+    }
+
+    pub fn mi_pair2index(&self, (x, y): (usize, usize)) -> usize {
+        let (x, y) = if x < y { (x, y) } else { (y, x) };
+        triu_pair_to_index(self.nvars, x, y)
+    }
+
+    pub fn dim(&self, x: usize) -> usize {
+        self.hist_dim[x]
+    }
 }
 
-#[derive(PartialEq)]
+pub struct MIPairIterator<'a> {
+    ixlu: &'a IndexLU,
+    mi_range: Range<usize>,
+    c_item: (usize, usize),
+    counter: usize,
+}
+
+impl<'a> MIPairIterator<'a> {
+    pub fn new(ixlu: &'a IndexLU, mi_range: Range<usize>) -> Self {
+        Self {
+            counter: mi_range.start,
+            c_item: (0, 0),
+            mi_range,
+            ixlu,
+        }
+    }
+}
+
+impl<'a> Iterator for MIPairIterator<'a> {
+    type Item = (usize, usize);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.counter >= self.mi_range.end {
+            self.c_item = (0, 0);
+            None
+        } else if self.counter == self.mi_range.start {
+            self.c_item = self.ixlu.mi_index2pair(self.mi_range.start);
+            self.counter += 1;
+            Some(self.c_item)
+        } else {
+            self.c_item = self.ixlu.mi_next_to(self.c_item);
+            self.counter += 1;
+            Some(self.c_item)
+        }
+    }
+}
+
+pub struct SIPairIterator<'a> {
+    ixlu: &'a IndexLU,
+    si_range: Range<usize>,
+    c_item: (usize, usize),
+    c_index: usize,
+}
+
+impl<'a> SIPairIterator<'a> {
+    pub fn new(ixlu: &'a IndexLU, si_range: Range<usize>) -> Self {
+        Self {
+            c_index: si_range.start,
+            c_item: (0, 0),
+            si_range,
+            ixlu,
+        }
+    }
+}
+
+impl<'a> Iterator for SIPairIterator<'a> {
+    type Item = (usize, usize);
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.c_index >= self.si_range.end {
+            self.c_item = (0, 0);
+            None
+        } else if self.c_index >= self.si_range.start {
+            self.c_item = self.ixlu.si_index2pair(self.c_index);
+            self.c_index += 1;
+            Some(self.c_item)
+        } else {
+            self.c_index = self.si_range.end;
+            self.c_item = (0, 0);
+            None
+        }
+    }
+}
+
+#[derive(PartialEq, Clone)]
 pub enum DistMode {
     LMRUniform,
     VarUniform,
@@ -141,12 +238,8 @@ pub enum DistMode {
 //  - Local starting and ending pairs
 //  - Distribution scheme
 //  - Distributed si, lmr and mi
-pub struct LMRDist<FloatT> {
-    ixlu: Rc<SILMRIndexLU>,
-    si_begin: (usize, usize), // begin about, by
-    si_end: (usize, usize),   // end about, by
-    mi_begin: (usize, usize), // begin i, j
-    mi_end: (usize, usize),   // end i, j
+pub struct DistSILMR<FloatT> {
+    ixlu: IndexLU, // index lookup
     si_dist: ArbitDist,
     mi_dist: InterleavedDist,
     var_dist: InterleavedDist,
@@ -156,20 +249,23 @@ pub struct LMRDist<FloatT> {
     mode: DistMode,
 }
 
-impl<FloatT> Display for LMRDist<FloatT> {
+impl<FloatT> Display for DistSILMR<FloatT>
+where
+    FloatT: 'static + PNFloat + H5Type + Default + Equivalence,
+{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{{")?;
         write!(
             f,
             "{{si_bounds: {:?}, si_dist: {:?}, si: {}}}, ",
-            (self.si_begin, self.si_end),
+            self.si_pair_bounds(),
             self.si_dist.range(),
             self.si.len(),
         )?;
         write!(
             f,
             "{{mi_bounds: {:?},  mi_dist: {:?}, mi: {}}}",
-            (self.mi_begin, self.mi_end),
+            self.mi_pair_bounds(),
             self.mi_dist.range(),
             self.mi.len(),
         )?;
@@ -177,93 +273,209 @@ impl<FloatT> Display for LMRDist<FloatT> {
     }
 }
 
-impl<FloatT> LMRDist<FloatT>
+impl<FloatT> DistSILMR<FloatT>
 where
-    FloatT: 'static + PNFloat + H5Type + Default + Equivalence,
+    FloatT: 'static + PNFloat + H5Type,
 {
-    pub fn with_lmr_uniform(
-        ixlu: Rc<SILMRIndexLU>,
-        cx: &CommIfx,
-        h5fn: &str,
-    ) -> Result<Self> {
-        let si_range = InterleavedDist::new(ixlu.nsi, cx.size, cx.rank).range();
-        let mut si_begin = ixlu.index2pair(si_range.start);
-        let si_end = ixlu.index2pair(si_range.end);
-        if cx.rank > 0 {
-            si_begin = ixlu.next_to(si_begin)
+    pub fn si_start_for(
+        ixlu: &IndexLU,
+        nproc: i32,
+        rank: i32,
+        mode: DistMode,
+    ) -> (usize, usize) {
+        match mode {
+            DistMode::LMRUniform => {
+                let si_begin = ixlu.si_index2pair(InterleavedDist::block_start(
+                    ixlu.nsi, nproc, rank,
+                ));
+                if rank > 0 {
+                    ixlu.si_next_to(si_begin)
+                } else {
+                    si_begin
+                }
+            }
+            DistMode::VarUniform => {
+                (InterleavedDist::block_start(ixlu.nvars, nproc, rank), 0)
+            }
         }
-        let idx_begin = ixlu.start_idx(si_begin);
-        let idx_end = ixlu.end_idx(si_end);
+    }
 
+    pub fn si_end_for(
+        ixlu: &IndexLU,
+        nproc: i32,
+        rank: i32,
+        mode: DistMode,
+    ) -> (usize, usize) {
+        match mode {
+            DistMode::LMRUniform => ixlu
+                .si_index2pair(InterleavedDist::block_end(ixlu.nsi, nproc, rank)),
+            DistMode::VarUniform => (
+                InterleavedDist::block_end(ixlu.nvars, nproc, rank) - 1,
+                ixlu.nvars - 1,
+            ),
+        }
+    }
+
+    pub fn si_bounds_for(
+        ixlu: &IndexLU,
+        nproc: i32,
+        rank: i32,
+        mode: DistMode,
+    ) -> ((usize, usize), (usize, usize)) {
+        (
+            Self::si_start_for(ixlu, nproc, rank, mode.clone()),
+            Self::si_end_for(ixlu, nproc, rank, mode.clone()),
+        )
+        //match mode {
+        //    DistMode::LMRUniform => {
+        //        let si_range = InterleavedDist::new(ixlu.nsi, size, rank).range();
+        //        let mut si_begin = ixlu.si_index2pair(si_range.start);
+        //        let si_end = ixlu.si_index2pair(si_range.end);
+        //        if rank > 0 {
+        //            si_begin = ixlu.si_next_to(si_begin)
+        //        }
+        //        (si_begin, si_end)
+        //    }
+        //    DistMode::VarUniform => {
+        //        let v_range =
+        //            InterleavedDist::new(ixlu.nvars, size, rank).range();
+        //        let si_begin = (v_range.start, 0);
+        //        let si_end = (v_range.end - 1, ixlu.nvars - 1);
+        //        (si_begin, si_end)
+        //    }
+        //}
+    }
+
+    pub fn from_ixlu(
+        local_size: usize,
+        ixlu: IndexLU,
+        mode: DistMode,
+        cx: &CommIfx,
+        h5f: &str,
+    ) -> Result<Self> {
         //
-        let sizes = allgather_one(&(idx_end - idx_begin), cx.comm())?;
-        let mdst = InterleavedDist::new(ixlu.npairs, cx.size, cx.rank);
-        let sdst = ArbitDist::new(ixlu.nsi, cx.size, cx.rank, sizes);
-        let mi = mpio::block_read1d(cx, h5fn, "data/mi", Some(&mdst))?;
-        let si = mpio::block_read1d(cx, h5fn, "data/si", Some(&sdst))?;
-        let lmr = mpio::block_read1d(cx, h5fn, "data/lmr", Some(&sdst))?;
+        let sizes = allgather_one(&local_size, cx.comm())?;
+        let mi_dist = InterleavedDist::new(ixlu.npairs, cx.size, cx.rank);
+        let si_dist = ArbitDist::new(ixlu.nsi, cx.size, cx.rank, sizes);
+        let mi = mpio::block_read1d(cx, h5f, "data/mi", Some(&mi_dist))?;
+        let si = mpio::block_read1d(cx, h5f, "data/si", Some(&si_dist))?;
+        let lmr = mpio::block_read1d(cx, h5f, "data/lmr", Some(&si_dist))?;
 
         Ok(Self {
-            ixlu: ixlu.clone(),
-            si_begin,
-            si_end,
-            si_dist: sdst,
+            si_dist,
             si,
             lmr,
-            mi_begin: triu_index_to_pair(ixlu.nvars, mdst.start()),
-            mi_end: triu_index_to_pair(ixlu.nvars, mdst.end() - 1),
-            mi_dist: mdst,
+            mi_dist,
             mi,
             var_dist: InterleavedDist::new(ixlu.nvars, cx.size, cx.rank),
-            mode: DistMode::LMRUniform,
+            mode,
+            ixlu,
         })
     }
 
-    pub fn with_var_uniform(
-        ixlu: Rc<SILMRIndexLU>,
+    pub fn with_mode<SizeT, IntT>(
         cx: &CommIfx,
-        h5fn: &str,
-    ) -> Result<Self> {
-        let var_dist = InterleavedDist::new(ixlu.nvars, cx.size, cx.rank);
-        let nv_range = var_dist.range();
-        let si_begin = (nv_range.start, 0);
-        let si_end = (nv_range.end - 1, ixlu.nvars - 1);
-        let idx_begin = ixlu.start_idx(si_begin);
-        let idx_end = ixlu.end_idx(si_end);
-        //
-        let sizes = allgather_one(&(idx_end - idx_begin), cx.comm())?;
-        let mdst = InterleavedDist::new(ixlu.npairs, cx.size, cx.rank);
-        let sdst = ArbitDist::new(ixlu.nsi, cx.size, cx.rank, sizes);
-        let mi = mpio::block_read1d(cx, h5fn, "data/mi", Some(&mdst))?;
-        let si = mpio::block_read1d(cx, h5fn, "data/si", Some(&sdst))?;
-        let lmr = mpio::block_read1d(cx, h5fn, "data/lmr", Some(&sdst))?;
-
-        Ok(Self {
-            ixlu: ixlu.clone(),
-            si_begin,
-            si_end,
-            si_dist: sdst,
-            si,
-            lmr,
-            mi_begin: triu_index_to_pair(ixlu.nvars, mdst.start()),
-            mi_end: triu_index_to_pair(ixlu.nvars, mdst.end() - 1),
-            mi_dist: mdst,
-            mi,
-            var_dist,
-            mode: DistMode::VarUniform,
-        })
+        h5f: &str,
+        mode: DistMode,
+    ) -> Result<Self>
+    where
+        SizeT: 'static + PNInteger + H5Type,
+        IntT: PNInteger + H5Type,
+    {
+        let ixlu = IndexLU::new::<SizeT, IntT>(h5f)?;
+        let (si_begin, si_end) =
+            Self::si_bounds_for(&ixlu, cx.size, cx.rank, mode.clone());
+        let idx_begin = ixlu.si_start_idx(si_begin);
+        let idx_end = ixlu.si_end_idx(si_end);
+        Self::from_ixlu(idx_end - idx_begin, ixlu, mode, cx, h5f)
     }
 
-    pub fn var_local_range(&self, v_about: usize) -> Range<usize> {
+    //pub fn with_lmr_uniform<SizeT, IntT>(cx: &CommIfx, h5f: &str) -> Result<Self>
+    //where
+    //    SizeT: 'static + PNInteger + H5Type,
+    //    IntT: PNInteger + H5Type,
+    //{
+    //    let ixlu = IndexLU::new::<SizeT, IntT>(h5f)?;
+    //    let (si_begin, si_end) =
+    //        Self::si_bounds_for(&ixlu, cx.size, cx.rank, DistMode::LMRUniform);
+    //    let idx_begin = ixlu.si_start_idx(si_begin);
+    //    let idx_end = ixlu.si_end_idx(si_end);
+    //    Self::from_ixlu(idx_end - idx_begin, ixlu, DistMode::LMRUniform, cx, h5f)
+    //}
+
+    //pub fn with_var_uniform<IntT, SizeT>(cx: &CommIfx, h5f: &str) -> Result<Self>
+    //where
+    //    SizeT: 'static + PNInteger + H5Type,
+    //    IntT: PNInteger + H5Type,
+    //{
+    //    let ixlu = IndexLU::new::<SizeT, IntT>(h5f)?;
+    //    let (si_begin, si_end) =
+    //        Self::si_bounds_for(&ixlu, cx.size, cx.rank, DistMode::VarUniform);
+    //    let idx_begin = ixlu.si_start_idx(si_begin);
+    //    let idx_end = ixlu.si_end_idx(si_end);
+    //    Self::from_ixlu(idx_end - idx_begin, ixlu, DistMode::VarUniform, cx, h5f)
+    //}
+
+    pub fn nvars(&self) -> usize {
+        self.ixlu.nvars
+    }
+
+    pub fn dim(&self, x: usize) -> usize {
+        self.ixlu.dim(x)
+    }
+
+    pub fn si_first_pair(&self) -> (usize, usize) {
+        Self::si_start_for(
+            &self.ixlu,
+            self.si_dist.comm_size() as i32,
+            self.si_dist.comm_rank() as i32,
+            self.mode.clone(),
+        )
+    }
+
+    pub fn si_last_pair(&self) -> (usize, usize) {
+        Self::si_end_for(
+            &self.ixlu,
+            self.si_dist.comm_size() as i32,
+            self.si_dist.comm_rank() as i32,
+            self.mode.clone(),
+        )
+    }
+
+    pub fn si_pair_bounds(&self) -> ((usize, usize), (usize, usize)) {
+        Self::si_bounds_for(
+            &self.ixlu,
+            self.si_dist.comm_size() as i32,
+            self.si_dist.comm_rank() as i32,
+            self.mode.clone(),
+        )
+    }
+
+    pub fn mi_first_pair(&self) -> (usize, usize) {
+        self.ixlu.mi_index2pair(self.mi_dist.start())
+    }
+
+    pub fn mi_last_pair(&self) -> (usize, usize) {
+        self.ixlu.mi_index2pair(self.mi_dist.end() - 1)
+    }
+
+    pub fn mi_pair_bounds(&self) -> ((usize, usize), (usize, usize)) {
+        (self.mi_first_pair(), self.mi_last_pair())
+    }
+
+    // lmr/si range corresponding to the avilable region
+    pub fn si_local_range_for(&self, v_about: usize) -> Range<usize> {
         match self.mode {
             DistMode::VarUniform => {
-                let sidx = self.si_dist.start();
-                let v_gidx = self.ixlu.start_idx((v_about, 0));
-                assert!(sidx <= v_gidx);
-                assert!(v_gidx < self.si_dist.end());
-                let v_start_idx = v_gidx - sidx;
-                let v_size = self.ixlu.hist_dim[v_about] * self.ixlu.nvars;
+                let si_gstart = self.si_dist.start();
+                let si_gend = self.si_dist.end();
+                let v_gidx = self.ixlu.si_start_idx((v_about, 0));
+                assert!(si_gstart <= v_gidx);
+                assert!(v_gidx < si_gend);
+                let v_start_idx = v_gidx - si_gstart;
+                let v_size = self.dim(v_about) * self.nvars();
                 let v_end_idx = v_start_idx + v_size;
+                //let v_end_idx = v_end_idx.min(self.si.len());
                 v_start_idx..v_end_idx
             }
             DistMode::LMRUniform => {
@@ -273,63 +485,91 @@ where
         }
     }
 
+    pub fn mi_local_index(&self, (x, y): (usize, usize)) -> usize {
+        let mi_start = self.mi_dist.start();
+        let m_gidx = self.ixlu.mi_pair2index((x, y));
+        assert!(mi_start <= m_gidx);
+        assert!(m_gidx < self.mi_dist.end());
+        m_gidx - mi_start
+    }
+
     pub fn mi_pair2owner(&self, (x, y): (usize, usize)) -> i32 {
-        let (x, y) = if x < y { (x, y) } else { (y, x) };
-        let midx = triu_pair_to_index(self.ixlu.nvars, x, y);
+        let midx = self.ixlu.mi_pair2index((x, y));
         self.mi_dist.owner(midx)
     }
 
-    pub fn si_pair_counts(&self) -> Vec<usize> {
-        match self.mode {
-            DistMode::VarUniform => {
-                let mut pvec = vec![0; self.si_dist.comm_size() as usize];
-                for sidx in self.si_dist.range() {
-                    let (x, y) = self.ixlu.index2pair(sidx);
-                    if x == y {
-                        continue;
-                    }
-                    let mown = self.mi_pair2owner((x, y)) as usize;
-                    pvec[mown] += 1;
-                }
-                pvec
+    pub fn si2mi_counts(&self) -> Vec<usize> {
+        // TODO:: verify if it is the same for both modes
+        let mut pvec = vec![0; self.si_dist.comm_size() as usize];
+        for (x, y) in SIPairIterator::new(&self.ixlu, self.si_dist.range()) {
+            if x == y {
+                continue;
             }
-            DistMode::LMRUniform => {
-                // TODO:: probably the same, I think
-                todo!("For non over lapping")
-            }
+            let mown = self.mi_pair2owner((x, y)) as usize;
+            pvec[mown] += 1;
         }
+        //for sidx in self.si_dist.range() {
+        //    let (x, y) = self.ixlu.si_index2pair(sidx);
+        //    if x == y {
+        //        continue;
+        //    }
+        //    let mown = self.mi_pair2owner((x, y)) as usize;
+        //    pvec[mown] += 1;
+        //}
+        pvec
     }
 
-    pub fn var_lmr_slice(&self, v_about: usize) -> &[FloatT] {
-        let v_range = self.var_local_range(v_about);
+    pub fn si2mi_unique_counts(&self) -> Vec<usize> {
+        // TODO:: verify if it is the same for both modes
+        let mut pvec = vec![0; self.si_dist.comm_size() as usize];
+        let siter = SIPairIterator::new(&self.ixlu, self.si_dist.range());
+        for (x, y) in siter.unique() {
+            if x == y {
+                continue;
+            }
+            let mown = self.mi_pair2owner((x, y)) as usize;
+            pvec[mown] += 1;
+        }
+        //for sidx in self.si_dist.range() {
+        //    let (x, y) = self.ixlu.si_index2pair(sidx);
+        //    if x == y {
+        //        continue;
+        //    }
+        //    let mown = self.mi_pair2owner((x, y)) as usize;
+        //    pvec[mown] += 1;
+        //}
+        pvec
+    }
+
+    pub fn local_lmr_slice_for(&self, v_about: usize) -> &[FloatT] {
+        let v_range = self.si_local_range_for(v_about);
         &self.lmr.as_slice().unwrap_or_default()[v_range]
     }
 }
 
-pub struct LMRSADist<'a, IntT, FloatT> {
-    dist: &'a LMRDist<FloatT>,
+pub struct DistLMRMinSum<'a, IntT, FloatT> {
+    dist: &'a DistSILMR<FloatT>,
     pair_x: Array1<IntT>,
     pair_y: Array1<IntT>,
     minsum: Array1<FloatT>,
     minsum_ind: Array1<bool>,
 }
 
-impl<'a, IntT, FloatT> LMRSADist<'a, IntT, FloatT>
+impl<'a, IntT, FloatT> DistLMRMinSum<'a, IntT, FloatT>
 where
     IntT: PNInteger + H5Type + Default + Equivalence,
     FloatT: 'static + PNFloat + H5Type + Default + Equivalence,
 {
     pub fn from_unif_vars(
         cx: &CommIfx,
-        dist: &'a LMRDist<FloatT>,
+        dist: &'a DistSILMR<FloatT>,
     ) -> Result<Self> {
         assert!(dist.mode == DistMode::VarUniform);
-        let idxlu = &dist.ixlu;
-        let var_ints: Vec<IntT> = (0..idxlu.nvars)
+        let var_ints: Vec<IntT> = (0..dist.nvars())
             .map(|x| IntT::from_usize(x).unwrap())
             .collect();
         //  1. allocate minsum, indicator vec with capacity
-        let counts = dist.si_pair_counts();
+        let counts = dist.si2mi_unique_counts();
         let mut offsets: Vec<usize> =
             exc_prefix_sum(counts.clone().into_iter(), 1);
         let size = counts.iter().sum::<usize>();
@@ -337,17 +577,18 @@ where
         let mut py_vec = vec![IntT::zero(); size];
         let mut msum_vec = vec![FloatT::zero(); size];
         let mut msum_ind = vec![false; size];
+        let mut nctx = 0;
         for v_about in dist.var_dist.range() {
             // 1. lmr slice corresponding to variable vi
-            let lslice = dist.var_lmr_slice(v_about);
+            let lslice = dist.local_lmr_slice_for(v_about);
             // 2. Build LMRSA
             let lmr_sa = LMRSA::<IntT, FloatT>::from_lmr_slice(
-                IntT::from_usize(idxlu.hist_dim[v_about]).unwrap_or_default(),
-                idxlu.nvars,
+                IntT::from_usize(dist.dim(v_about)).unwrap_or_default(),
+                dist.nvars(),
                 lslice,
             )?;
             // 3. Minsum values and push into arrays
-            for v_by in 0..idxlu.nvars {
+            for v_by in 0..dist.nvars() {
                 if v_by == v_about {
                     continue;
                 }
@@ -366,8 +607,16 @@ where
                     msum_ind[loc] = false;
                 }
                 offsets[mown] += 1;
+                nctx += 1;
             }
         }
+        gather_debug!(cx.comm(); "SX {} {}", nctx, size);
+        debug_assert!(nctx == size);
+        debug_assert!(itertools::all(
+            zip(px_vec.iter(), py_vec.iter()),
+            |(x, y)| *x < *y
+        ));
+
         let recv_counts = all2all_vec(&counts, cx.comm())?;
         let px_vec = all2allv_vec(&px_vec, &counts, &recv_counts, cx.comm())?;
         let pair_x: Array1<IntT> = Array1::from_vec(px_vec);
@@ -377,6 +626,10 @@ where
         let minsum: Array1<FloatT> = Array1::from_vec(msum_vec);
         let msum_ind = all2allv_vec(&msum_ind, &counts, &recv_counts, cx.comm())?;
         let minsum_ind: Array1<bool> = Array1::from_vec(msum_ind);
+        debug_assert!(itertools::all(
+            zip(pair_x.iter(), pair_y.iter()),
+            |(x, y)| *x < *y
+        ));
 
         Ok(Self {
             dist,
@@ -397,21 +650,65 @@ struct PUCDistWorkFlowHelper<SizeT, IntT, FloatT> {
     _a: PhantomData<(SizeT, IntT, FloatT)>,
 }
 
-impl<'a, SizeT, IntT, FloatT> PUCDistWorkFlowHelper<SizeT, IntT, FloatT>
+impl<SizeT, IntT, FloatT> PUCDistWorkFlowHelper<SizeT, IntT, FloatT>
 where
     SizeT: 'static + PNInteger + H5Type + Default + Equivalence,
     IntT: PNInteger + H5Type + Default + Equivalence,
     FloatT: 'static + PNFloat + H5Type + Default + Equivalence,
 {
-    fn dist_for(wf: &PUCDistWorkflow) -> Result<LMRDist<FloatT>> {
-        let l_bounds = Rc::new(SILMRIndexLU::new::<SizeT, IntT>(wf.args)?);
-        let l_dist = LMRDist::with_var_uniform(
-            l_bounds,
+    fn var_uniform_dist(wf: &PUCDistWorkflow) -> Result<DistSILMR<FloatT>> {
+        DistSILMR::<FloatT>::with_mode::<SizeT, IntT>(
             wf.mpi_ifx,
             &wf.args.misi_data_file,
-        )?;
+            DistMode::VarUniform,
+        )
+    }
 
-        Ok(l_dist)
+    fn var_uniform_lmr_minsum<'a>(
+        wf: &PUCDistWorkflow,
+        dist: &'a DistSILMR<FloatT>,
+    ) -> Result<DistLMRMinSum<'a, IntT, FloatT>> {
+        DistLMRMinSum::<'a, IntT, FloatT>::from_unif_vars(wf.mpi_ifx, dist)
+    }
+
+    fn generate_pairs(dist: &DistSILMR<FloatT>) -> Array2<IntT> {
+        let mut r_pairs = Array2::<IntT>::zeros((dist.mi.len(), 2));
+        let (s_vec, t_vec): (Vec<_>, Vec<_>) =
+            MIPairIterator::new(&dist.ixlu, dist.mi_dist.range())
+                .map(|(a, b)| {
+                    (
+                        IntT::from_usize(a).unwrap_or_default(),
+                        IntT::from_usize(b).unwrap_or_default(),
+                    )
+                })
+                .collect();
+        r_pairs
+            .slice_mut(ndarray::s![.., 0])
+            .assign(&Array1::from_vec(s_vec));
+        r_pairs
+            .slice_mut(ndarray::s![.., 1])
+            .assign(&Array1::from_vec(t_vec));
+
+        r_pairs
+    }
+
+    fn compute_puc(
+        dist: &DistSILMR<FloatT>,
+        dlmr_sum: &DistLMRMinSum<IntT, FloatT>,
+    ) -> PUCResults<IntT, FloatT> {
+        let r_pindex = Self::generate_pairs(dist);
+        let mut r_pucs = Array1::from_vec(vec![FloatT::zero(); r_pindex.nrows()]);
+        for ((x, y), minsum) in
+            zip(dlmr_sum.pair_x.iter(), dlmr_sum.pair_y.iter())
+                .zip(dlmr_sum.minsum.iter())
+        {
+            let midx = dist
+                .mi_local_index((x.to_usize().unwrap(), y.to_usize().unwrap()));
+            let mi = dist.mi[midx];
+            r_pucs[midx] +=
+                FloatT::from_usize(dist.nvars() - 2).unwrap() * (*minsum / mi);
+        }
+        PUCResults::new(r_pindex, r_pucs)
     }
 }
 
@@ -419,12 +716,36 @@ impl<'a> PUCDistWorkflow<'a> {
     pub fn run(&self) -> Result<()> {
         type HelperT = PUCDistWorkFlowHelper<i64, i32, f32>;
         let mut s_timer = SectionTimer::from_comm(self.mpi_ifx.comm(), ",");
-        let l_dist = HelperT::dist_for(self)?;
-        let l_bounds = &l_dist.ixlu;
+        let vu_dist = HelperT::var_uniform_dist(self)?;
         s_timer.info_section("Dist Build");
-        gather_info!(self.mpi_ifx.comm(); "D {}", l_dist);
-        cond_info!(self.mpi_ifx.is_root(); "Bounds {}", l_bounds);
+        gather_debug!(self.mpi_ifx.comm(); "D {}", vu_dist);
+        cond_info!(self.mpi_ifx.is_root(); "Bounds {}", vu_dist.ixlu);
         s_timer.reset();
+        let dist_minsum = HelperT::var_uniform_lmr_minsum(self, &vu_dist)?;
+        s_timer.info_section("LMR Minsum");
+        gather_debug!(
+            self.mpi_ifx.comm();
+            "{} {} {} {} {}",
+            vu_dist.mi.len(),
+            vu_dist.mi[0],
+            dist_minsum.pair_x[0],
+            dist_minsum.pair_y[0],
+            dist_minsum.minsum[0],
+        );
+        s_timer.reset();
+        let puc_results = HelperT::compute_puc(&vu_dist, &dist_minsum);
+        s_timer.info_section("PUC Results");
+        s_timer.reset();
+        gather_debug!(
+            self.mpi_ifx.comm();
+            "{} {:?} {}",
+            puc_results.len(),
+            puc_results.index.slice(ndarray::s![0, ..]),
+            puc_results.val[0],
+        );
+
+        puc_results.save(self.mpi_ifx, &self.args.puc_file)?;
+        s_timer.info_section("Save PUC Results");
         Ok(())
     }
 }

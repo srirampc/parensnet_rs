@@ -35,7 +35,7 @@ num = "0.4"
 rand = "0.10.0"
 serde = { version = "1.0.228", features = ["derive", "std"] }
 serde_json = "1.0"
-serde-saphyr = "0.0.18"
+serde-saphyr = "0.0.21"
 sope = { path = "ext/sope" }
 thiserror = "2.0.18"
 
