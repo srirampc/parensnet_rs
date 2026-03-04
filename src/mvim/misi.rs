@@ -672,7 +672,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::{LMRDSPair, MISIPair, MISIRangePair};
-    use crate::mvim::rv::{Error, MRVTrait};
+    use crate::mvim::rv::{Error, LMRSA, MRVTrait};
 
     lazy_static! {
         static ref MISI_H5: &'static str = crate::tests::test_misi_file();
@@ -801,6 +801,36 @@ mod tests {
             assert!(lpuc_diff);
             assert!(dspuc_diff);
         }
+        Ok(())
+    }
+
+    #[test]
+    pub fn test_misi_pair_lmrsa() -> Result<()> {
+        crate::tests::log_init();
+        let (i, j) = PAIRS_LIST[0];
+        let bpair =
+            MISIPair::<i64, i32, f32>::new(&MISI_H5, (i as usize, j as usize))?;
+        let (ilmrsa, jlmrsa) = (
+            LMRSA::from_mrv_trait(&bpair, 0)?,
+            LMRSA::from_mrv_trait(&bpair, 1)?,
+        );
+        let (imsum, jmsum) = (
+            ilmrsa.minsum_wsrc(j as usize),
+            jlmrsa.minsum_wsrc(i as usize),
+        );
+        let lmpx = bpair.compute_lm_puc(i, j)?;
+        let mi = bpair.get_mi(i, j)?;
+        debug!(
+            "MISI LMRSA {} {} {} {} {} {}",
+            mi,
+            bpair.get_puc_factor(i, j)?,
+            bpair.get_puc_factor(j, i)?,
+            lmpx,
+            imsum,
+            jmsum,
+        );
+        let rsum = (2 * (bpair.nvars - 2)) as f32 - (imsum / mi) - (jmsum / mi);
+        assert_eq!(lmpx, rsum);
         Ok(())
     }
 

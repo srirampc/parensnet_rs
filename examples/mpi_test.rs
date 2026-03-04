@@ -218,7 +218,7 @@ fn test_blocks_2d(
                     (acc_x + x, acc_y + y, acc_s0 + s0, acc_s1 + s1)
                 },
             );
-    let to_snd_ord_pairs = snd_ord
+    let _to_snd_ord_pairs = snd_ord
         .iter()
         .enumerate()
         .map(|(i, x)| if i != mcx.rank as usize { *x } else { 0usize })

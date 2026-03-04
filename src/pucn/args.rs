@@ -41,6 +41,8 @@ pub enum LogLevel {
 pub enum RunMode {
     #[serde(alias = "misi")]
     MISI,
+    #[serde(alias = "hist_dist")]
+    HistDist,
     #[serde(alias = "misi_dist")]
     MISIDist,
     #[serde(alias = "sampled_puc_pairs")]
@@ -77,6 +79,8 @@ pub struct WorkflowArgs {
     pub misi_data_file: String,
     pub puc_file: String,
     pub pidc_file: String,
+    #[serde(default)]
+    pub hist_data_file: String,
 
     //  - Run Modes
     pub mode: Vec<RunMode>, //

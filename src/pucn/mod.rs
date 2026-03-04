@@ -217,13 +217,10 @@ pub fn execute_workflow(mpi_ifx: &CommIfx, args: &WorkflowArgs) -> Result<()> {
                 lpuc.run()?;
             }
             RunMode::PUCLMRDist => {
-                let lpuc = puc_dist::PUCDistWorkflow {
-                    args,
-                    mpi_ifx,
-                };
+                let lpuc = puc_dist::PUCDistWorkflow { args, mpi_ifx };
                 lpuc.run()?;
             }
-            RunMode::MISI => {
+            RunMode::MISI | RunMode::MISIDist | RunMode::HistDist => {
                 let adata = AnnData::new(&args.h5ad_file, None)?;
                 let rmisi = misiw::MISIWorkFlow {
                     args,
@@ -231,7 +228,12 @@ pub fn execute_workflow(mpi_ifx: &CommIfx, args: &WorkflowArgs) -> Result<()> {
                     wdistr: &wdistr,
                     mpi_ifx,
                 };
-                rmisi.run()?;
+                match rmode {
+                    RunMode::MISI => rmisi.run()?,
+                    RunMode::MISIDist => rmisi.run_misi_dist()?,
+                    RunMode::HistDist => rmisi.run_hist()?,
+                    _ => todo!("Missing mode"),
+                }
             }
             _ => todo!("Mode {:?} Not Completed Yet", rmode),
         }
