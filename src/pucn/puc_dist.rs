@@ -662,14 +662,14 @@ impl<'a> PUCDistWorkflow<'a> {
         let mut s_timer = SectionTimer::from_comm(self.mpi_ifx.comm(), ",");
         let vu_dist = HelperT::var_uniform_dist(self)?;
         s_timer.info_section("Dist PUC::Build");
-        gather_info!(self.mpi_ifx.comm(); "LMR Distr. {}", vu_dist);
+        gather_debug!(self.mpi_ifx.comm(); "LMR Distr. {}", vu_dist);
         cond_info!(self.mpi_ifx.is_root(); "Bounds {}", vu_dist.ixlu);
         s_timer.reset();
         let dist_minsum = HelperT::var_uniform_lmr_minsum(self, &vu_dist)?;
         s_timer.info_section("Dist PUC::LMR Minsum");
         gather_debug!(
             self.mpi_ifx.comm();
-            "{} {} {} {} {}",
+            "Dist Minsum {} {} {} {} {}",
             vu_dist.mi.len(),
             vu_dist.mi[0],
             dist_minsum.pair_x[0],

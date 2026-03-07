@@ -9,7 +9,7 @@ nsamples: 0
 nobs: 0
 nvars: 0
 mode:
-  - "hist_dist"
+  - "misi_dist"
   #- "samples_ranges"
   #- "puc2pidc"
 tbase: "2"
