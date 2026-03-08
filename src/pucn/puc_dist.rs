@@ -17,7 +17,7 @@ use ndarray::{Array1, Array2};
 use num::ToPrimitive;
 use sope::{
     collective::{all2all_vec, all2allv_vec, allgather_one},
-    gather_debug, gather_info,
+    gather_debug,
     partition::{ArbitDist, Dist, InterleavedDist},
     timer::SectionTimer,
 };

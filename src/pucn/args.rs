@@ -41,7 +41,11 @@ pub enum LogLevel {
 pub enum RunMode {
     #[serde(alias = "misi")]
     MISI,
+    #[serde(alias = "hist_nodes")]
+    HistNodes,
     #[serde(alias = "hist_dist")]
+    HistNodes2MISI,
+    #[serde(alias = "hist2misi_dist")]
     HistDist,
     #[serde(alias = "misi_dist")]
     MISIDist,

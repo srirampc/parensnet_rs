@@ -232,6 +232,8 @@ pub fn execute_workflow(mpi_ifx: &CommIfx, args: &WorkflowArgs) -> Result<()> {
                     RunMode::MISI => rmisi.run()?,
                     RunMode::MISIDist => rmisi.run_misi_dist()?,
                     RunMode::HistDist => rmisi.run_hist()?,
+                    RunMode::HistNodes => rmisi.run_hist_nodes()?,
+                    RunMode::HistNodes2MISI => rmisi.run_misi_dist_from_nodes()?,
                     _ => todo!("Missing mode"),
                 }
             }
