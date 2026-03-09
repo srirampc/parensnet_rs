@@ -220,7 +220,8 @@ pub fn execute_workflow(mpi_ifx: &CommIfx, args: &WorkflowArgs) -> Result<()> {
                 let lpuc = puc_dist::PUCDistWorkflow { args, mpi_ifx };
                 lpuc.run()?;
             }
-            RunMode::MISI | RunMode::MISIDist | RunMode::HistDist => {
+           RunMode::MISI | RunMode::MISIDist | RunMode::HistDist |
+           RunMode::HistNodes  | RunMode::HistNodes2MISI => {
                 let adata = AnnData::new(&args.h5ad_file, None)?;
                 let rmisi = misiw::MISIWorkFlow {
                     args,

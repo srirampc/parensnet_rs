@@ -44,9 +44,9 @@ pub enum RunMode {
     #[serde(alias = "hist_nodes")]
     HistNodes,
     #[serde(alias = "hist_dist")]
-    HistNodes2MISI,
-    #[serde(alias = "hist2misi_dist")]
     HistDist,
+    #[serde(alias = "hist2misi_dist")]
+    HistNodes2MISI,
     #[serde(alias = "misi_dist")]
     MISIDist,
     #[serde(alias = "sampled_puc_pairs")]
