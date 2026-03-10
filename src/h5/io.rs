@@ -101,6 +101,9 @@ pub fn write_2d<T: H5Type>(
     dset_name: &str,
     data: &Array2<T>,
 ) -> Result<(), hdf5::Error> {
+    if let Result::Ok(_ds) = h_group.dataset(dset_name) {
+        h_group.unlink(dset_name)?;
+    }
     h_group
         .new_dataset_builder()
         .empty::<T>()
@@ -115,6 +118,9 @@ pub fn write_1d<T: H5Type>(
     dsname: &str,
     data: &Array1<T>,
 ) -> Result<(), hdf5::Error> {
+    if let Result::Ok(_ds) = h_group.dataset(dsname) {
+        h_group.unlink(dsname)?;
+    }
     let n_data = data.len();
     h_group
         .new_dataset_builder()

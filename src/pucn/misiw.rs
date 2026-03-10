@@ -6,7 +6,7 @@ use num::{FromPrimitive, ToPrimitive};
 use sope::{
     collective::{all2all_vec, all2allv_vec, allgather_one, allgatherv_full_vec},
     partition::{ArbitDist, Dist, InterleavedDist},
-    reduction::allreduce_sum,
+    reduction::{all_of, allreduce_sum},
     timer::SectionTimer,
     util::exc_prefix_sum,
 };
@@ -243,7 +243,7 @@ where
     IntT: Clone + Default + Debug + Equivalence + FromToPrimitive,
     FloatT: Clone + Default + Debug + H5Type + Equivalence,
 {
-    fn from_hist_h5(
+    fn from_h5(
         cx: &CommIfx,
         args: &WorkflowArgs,
         h5f: &str,
@@ -751,6 +751,13 @@ where
                 }
             }
         }
+        if log::log_enabled!(log::Level::Debug) {
+            // wf.mpi_ifx.comm().barrier();
+            let n_hist = allreduce_sum(&(v_hist.len()), wf.mpi_ifx.comm());
+            cond_debug!(
+                wf.mpi_ifx.is_root(); "Built Batch {} with : {} ", bidx, n_hist
+            );
+        }
         Ok(v_hist)
     }
 
@@ -949,15 +956,27 @@ where
         hist_pairs: &PairMICollection<IntT, FloatT>,
         hist_data_file: &str,
     ) -> Result<()> {
-        let h5_fptr = mpio::open_file_rw(w.mpi_ifx, hist_data_file)?;
-        let data_group = h5_fptr.group("data")?;
-        mpio::block_write1d(
-            w.mpi_ifx,
+        let rank_out_file = format!("{}.{:04}.{}",
+            hist_data_file.strip_suffix(".h5").unwrap_or_default(),
+            w.mpi_ifx.rank, 
+            "h5");
+        let h5_fptr = io::create_file(&rank_out_file)?;
+        let data_group = h5_fptr.create_group("data")?;
+        io::write_1d(
+            //w.mpi_ifx,
             &data_group,
             "pair_hist",
             &hist_pairs.xy_tab,
         )?;
-        mpio::block_write1d(w.mpi_ifx, &data_group, "mi", &hist_pairs.mi)?;
+        io::write_1d(&data_group, "mi", &hist_pairs.mi)?;
+        //mpio::write_1d(
+        //    w.mpi_ifx,
+        //    &data_group,
+        //    "pair_hist",
+        //    &hist_pairs.xy_tab,
+        //)?;
+        //mpio::block_write1d(w.mpi_ifx, &data_group, "mi", &hist_pairs.mi)?;
+        h5_fptr.close()?;
         Ok(())
     }
 
@@ -1137,9 +1156,18 @@ impl<'a> MISIWorkFlow<'a> {
             s_timer.reset();
         }
 
-        if self.mpi_ifx.rank == 0 {
-            HelperT::write_nodes_h5(self, &nodes, &self.args.hist_data_file)?;
-        }
+        let write_sucess = if self.mpi_ifx.rank == 0 {
+            match HelperT::write_nodes_h5(self, &nodes, &self.args.hist_data_file) {
+                Err(err) => {
+                    log::error!("Error in writing nodes : {}", err);
+                    all_of(false, self.mpi_ifx.comm())
+                }
+                _ => all_of(true, self.mpi_ifx.comm()),
+            }
+        } else {
+            all_of(true, self.mpi_ifx.comm())
+        };
+        assert!(write_sucess);
         if log::log_enabled!(log::Level::Info) {
             s_timer.info_section("Write Nodes");
             cond_info!(self.mpi_ifx.is_root(); "Completed Writing Nodes");
@@ -1200,7 +1228,7 @@ impl<'a> MISIWorkFlow<'a> {
             s_timer.reset();
         }
         // 2. Load node pairs
-        let hist_pairs = PairMICollection::<i32, f32>::from_hist_h5(
+        let hist_pairs = PairMICollection::<i32, f32>::from_h5(
             self.mpi_ifx,
             self.args,
             &self.args.hist_data_file,

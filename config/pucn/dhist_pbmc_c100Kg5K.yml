@@ -1,0 +1,17 @@
+h5ad_file: "./out/rsc.5k/adata_lei.100k.5k.h5ad"
+misi_data_file: "./out/pbmc100K.05K/adata.100K.5K.misidata.h5"
+hist_data_file: "./out/pbmc100K.05K/adata.100K.5K.hist.h5"
+puc_file: "./out/pbmc100K.05K/adata.100K.5K.lmr_puc.h5"
+pidc_file: "./out/pbmc100K.05K/adata.100K.5K.lmr_pidc.h5"
+#
+nrounds: 0
+nsamples: 0
+nobs: 0
+nvars: 0
+mode:
+  - "hist_dist"
+  #- "samples_ranges"
+  #- "puc2pidc"
+tbase: "e"
+save_nodes: False
+save_node_pairs: True
