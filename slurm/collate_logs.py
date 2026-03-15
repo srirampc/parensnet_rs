@@ -30,13 +30,16 @@ def parse_file_name(log_fname: str):
 
 
 def build_data_frame(
-    meta_props, rows, meta_names=["Run", "Data", "NCELLS", "NGENES", "NP", "N"]
+    meta_props,
+    rows,
+    col_names=["Max", "Min", "Avg", "Phase"],
+    meta_names=["Run", "Dataset", "NCELLS", "NGENES", "NP", "N"]
 ):
     nrows = len(rows)
     ncols = len(rows[0])
     df_data = {}
-    for ix in range(ncols):
-        df_data[f"c_{ix}"] = [rx[ix] for rx in rows]
+    for ix, cname in zip(range(ncols), col_names):
+        df_data[cname] = [rx[ix] for rx in rows]
     for mn, mpx in zip(meta_names, meta_props):
         df_data[mn] = [mpx for _ in range(nrows)]
     return pl.DataFrame(df_data)

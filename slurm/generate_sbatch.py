@@ -7,10 +7,10 @@ from typing_extensions import override
 HEADER = """#!/bin/bash
 #SBATCH -J{name}         # Job name
 #SBATCH -Agts-saluru8-coda20          # Tracking account
-#SBATCH -N{nodes}                           # Number of nodes required
+#SBATCH -N{nodes}                       # Number of nodes required
 #SBATCH --ntasks-per-node 16          # Number of cores/node required
-#SBATCH --mem-per-cpu=12G              # Memory per core
-#SBATCH -t{hours}:{mins:02d}:00                     # Duration of the job
+#SBATCH --mem-per-cpu=12G             # Memory per core
+#SBATCH -t{hours}:{mins:02d}:00          # Duration of the job
 #SBATCH -phive                        # Queue name
 #SBATCH -oslurm/log/%x.log            # Combined output and error
 
@@ -130,13 +130,25 @@ def main():
     # Pow2Scaling().generate_sbatches(1, 0, "lpuc_pbmc_c100Kg12K.yml", "./slurm/scripts/")
     # Pow2Scaling().generate_sbatches(1, 0, "dhist_pbmc_c20Kg5K.yml", "./slurm/scripts/")
     # Pow2Scaling().generate_sbatches(1, 0, "dmisi_pbmc_c20Kg5K.yml", "./slurm/scripts/")
+    Pow2Scaling().generate_sbatches(0, 30, "dmisi_pbmc_c100Kg1K.yml", "./slurm/scripts/")
+    Pow2Scaling().generate_sbatches(0, 30, "dmisi_pbmc_c100Kg3K.yml", "./slurm/scripts/")
+    Pow2Scaling().generate_sbatches(1, 00, "dmisi_pbmc_c100Kg5K.yml", "./slurm/scripts/")
+    Pow2Scaling().generate_sbatches(1, 00, "dmisi_pbmc_c100Kg8K.yml", "./slurm/scripts/")
+    Pow2Scaling().generate_sbatches(1, 00, "dmisi_pbmc_c100Kg10K.yml", "./slurm/scripts/")
+    Pow2Scaling().generate_sbatches(1, 00, "dmisi_pbmc_c100Kg12K.yml", "./slurm/scripts/")
     # Pow2Scaling().generate_sbatches(1, 0, "dpuc_pbmc_c20Kg5K.yml", "./slurm/scripts/")
+    Pow2Scaling().generate_sbatches(0, 30, "dpuc_pbmc_c100Kg1K.yml", "./slurm/scripts/")
+    Pow2Scaling().generate_sbatches(0, 30, "dpuc_pbmc_c100Kg3K.yml", "./slurm/scripts/")
+    Pow2Scaling().generate_sbatches(1, 00, "dpuc_pbmc_c100Kg5K.yml", "./slurm/scripts/")
+    Pow2Scaling().generate_sbatches(1, 00, "dpuc_pbmc_c100Kg8K.yml", "./slurm/scripts/")
+    Pow2Scaling().generate_sbatches(1, 00, "dpuc_pbmc_c100Kg10K.yml", "./slurm/scripts/")
+    Pow2Scaling().generate_sbatches(1, 00, "dpuc_pbmc_c100Kg12K.yml", "./slurm/scripts/")
     # Pow2Scaling().generate_sbatches(1, 0, "dhist_pbmc_c100Kg5K.yml", "./slurm/scripts/")
     # Pow2Scaling().generate_sbatches(1, 0, "dhist_pbmc_c100Kg10K.yml", "./slurm/scripts/")
     # Pow2Scaling().generate_sbatches(1, 0, "dhist_pbmc_c100Kg12K.yml", "./slurm/scripts/")
-    Pow2Scaling().generate_sbatches(1, 0, "dnodes2misi_pbmc_c100Kg5K.yml", "./slurm/scripts/")
-    Pow2Scaling().generate_sbatches(2, 0, "dnodes2misi_pbmc_c100Kg10K.yml", "./slurm/scripts/")
-    Pow2Scaling().generate_sbatches(2, 0, "dnodes2misi_pbmc_c100Kg12K.yml", "./slurm/scripts/")
+    # Pow2Scaling().generate_sbatches(1, 0, "dnodes2misi_pbmc_c100Kg5K.yml", "./slurm/scripts/")
+    # Pow2Scaling().generate_sbatches(2, 0, "dnodes2misi_pbmc_c100Kg10K.yml", "./slurm/scripts/")
+    # Pow2Scaling().generate_sbatches(2, 0, "dnodes2misi_pbmc_c100Kg12K.yml", "./slurm/scripts/")
 
 
 if __name__ == "__main__":

@@ -154,6 +154,31 @@ P100K10K = {
         "dnodes2misi_pbmc_c100Kg10K_p512n32.sh",
         "dnodes2misi_pbmc_c100Kg10K_p1024n64.sh",
     ],
+    "dmisi": [
+        # "dmisi_pbmc_c100Kg10K_p2n1.sh",
+        # "dmisi_pbmc_c100Kg10K_p4n1.sh",
+        # "dmisi_pbmc_c100Kg10K_p8n1.sh",
+        # "dmisi_pbmc_c100Kg10K_p16n1.sh",
+        # "dmisi_pbmc_c100Kg10K_p32n2.sh",
+        # "dmisi_pbmc_c100Kg10K_p64n4.sh",
+        "dmisi_pbmc_c100Kg10K_p128n8.sh",
+        "dmisi_pbmc_c100Kg10K_p256n16.sh",
+        "dmisi_pbmc_c100Kg10K_p512n32.sh",
+        "dmisi_pbmc_c100Kg10K_p1024n64.sh",
+    ],
+    "dpuc": [
+        # "dpuc_pbmc_c100Kg10K_p2n1.sh",
+        # "dpuc_pbmc_c100Kg10K_p4n1.sh",
+        # "dpuc_pbmc_c100Kg10K_p8n1.sh",
+        # "dpuc_pbmc_c100Kg10K_p16n1.sh",
+        # "dpuc_pbmc_c100Kg10K_p32n2.sh",
+        # "dpuc_pbmc_c100Kg10K_p64n4.sh",
+        "dpuc_pbmc_c100Kg10K_p128n8.sh",
+        "dpuc_pbmc_c100Kg10K_p256n16.sh",
+        "dpuc_pbmc_c100Kg10K_p512n32.sh",
+        "dpuc_pbmc_c100Kg10K_p1024n64.sh",
+    ],
+
 }
 
 P100K12K = {
@@ -192,6 +217,30 @@ P100K12K = {
         "dnodes2misi_pbmc_c100Kg12K_p256n16.sh",
         "dnodes2misi_pbmc_c100Kg12K_p512n32.sh",
         "dnodes2misi_pbmc_c100Kg12K_p1024n64.sh",
+    ],
+    "dmisi": [
+        # "dmisi_pbmc_c100Kg12K_p2n1.sh",
+        # "dmisi_pbmc_c100Kg12K_p4n1.sh",
+        # "dmisi_pbmc_c100Kg12K_p8n1.sh",
+        # "dmisi_pbmc_c100Kg12K_p16n1.sh",
+        # "dmisi_pbmc_c100Kg12K_p32n2.sh",
+        # "dmisi_pbmc_c100Kg12K_p64n4.sh",
+        "dmisi_pbmc_c100Kg12K_p128n8.sh",
+        "dmisi_pbmc_c100Kg12K_p256n16.sh",
+        "dmisi_pbmc_c100Kg12K_p512n32.sh",
+        "dmisi_pbmc_c100Kg12K_p1024n64.sh",
+    ],
+    "dpuc": [
+        # "dpuc_pbmc_c100Kg12K_p2n1.sh",
+        # "dpuc_pbmc_c100Kg12K_p4n1.sh",
+        # "dpuc_pbmc_c100Kg12K_p8n1.sh",
+        # "dpuc_pbmc_c100Kg12K_p16n1.sh",
+        # "dpuc_pbmc_c100Kg12K_p32n2.sh",
+        # "dpuc_pbmc_c100Kg12K_p64n4.sh",
+        "dpuc_pbmc_c100Kg12K_p128n8.sh",
+        "dpuc_pbmc_c100Kg12K_p256n16.sh",
+        "dpuc_pbmc_c100Kg12K_p512n32.sh",
+        "dpuc_pbmc_c100Kg12K_p1024n64.sh",
     ],
 }
 
@@ -236,7 +285,11 @@ def main():
     # submit_jobs(P100K5K["dhist"])
     # submit_jobs(P100K5K["dnodes2misi"])
     # submit_jobs(P100K10K["dnodes2misi"])
-    submit_jobs(P100K12K["dnodes2misi"])
+    # submit_jobs(P100K12K["dnodes2misi"])
+    # submit_jobs(P100K12K["dmisi"])
+    # submit_jobs(P100K10K["dmisi"])
+    submit_jobs(P100K10K["dpuc"])
+    submit_jobs(P100K12K["dpuc"])
 
 
 if __name__ == "__main__":
