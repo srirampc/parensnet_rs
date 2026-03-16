@@ -184,6 +184,22 @@ impl AnnData {
         Ok(ds.read_slice(ndarray::s![rbounds, column_index])?)
     }
 
+    pub fn read_column_around<T: H5Type + Float + FromPrimitive>(
+        &self,
+        column_index: usize,
+        n_decimals: usize,
+    ) -> Result<Array1<T>> {
+        // mat_col: NDFloatArray = hfx["X"][:, cindex]
+        let ds = self.h5_fptr.dataset("X")?;
+        let rbounds = ..self.nobs;
+        let cdata = ds.read_slice(ndarray::s![rbounds, column_index])?;
+        Ok(if n_decimals > 0 {
+            around(cdata.view(), n_decimals)
+        } else {
+            cdata
+        })
+    }
+
     pub fn read_gene_column<T: H5Type>(
         &self,
         gene_name: &str,
