@@ -151,8 +151,8 @@ where
 
     let block_length = edges.map(|x| uniq_data.values[n - 1] - *x);
     let bb_optimal = optimal_bayesian_blocks(&uniq_data.counts, &block_length);
-    log::debug!("Uninq {} : {:?}", uniq_data.values.len(), &uniq_data.values);
-    log::debug!("Optim {}: {}", bb_optimal.last.len(), &bb_optimal.last);
+    //log::debug!("Uninq {} : {:?}", uniq_data.values.len(), &uniq_data.values);
+    //log::debug!("Optim {}: {}", bb_optimal.last.len(), &bb_optimal.last);
 
     //change_points = np.zeros(n, dtype=np.int64)
     let mut change_points = Array1::<usize>::zeros(n);

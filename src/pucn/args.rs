@@ -19,6 +19,10 @@ fn default_nsamples() -> usize {
     200
 }
 
+fn default_lmr_only() -> bool {
+    false
+}
+
 // 'NOTSET', 'DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'
 #[repr(usize)]
 #[derive(Clone, Serialize, Deserialize, Debug, Default, PartialEq)]
@@ -131,6 +135,9 @@ pub struct WorkflowArgs {
 
     #[serde(default)]
     pub log_level: LogLevel, // = 'DEBUG'
+    //
+    #[serde(default = "default_lmr_only")]
+    pub lmr_only: bool,
 }
 
 impl WorkflowArgs {

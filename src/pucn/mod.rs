@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 mod args;
+mod ds;
+mod helpers;
 mod misiw;
 mod puc;
 mod puc_dist;
@@ -107,6 +109,19 @@ impl<T: Clone + Zero, S: Clone + Zero> IdVResults<T, S> {
         }
         Self::new(pindices, preds)
     }
+}
+
+pub(super) trait MISIWorkFlowTrait<'a> {
+    fn comm_ifx(&self) -> &'a CommIfx;
+    fn wf_dist(&self) -> &'a WorkDistributor;
+    fn wf_args(&self) -> &'a WorkflowArgs;
+    fn ann_data(&self) -> &'a AnnData;
+}
+
+pub(super) trait PUCWorkFlowTrait<'a> {
+    fn comm_ifx(&self) -> &'a CommIfx;
+    fn wf_dist(&self) -> &'a WorkDistributor;
+    fn wf_args(&self) -> &'a WorkflowArgs;
 }
 
 fn pair_indices<T>(st_ranges: RangePair<usize>) -> Array2<T>
@@ -220,8 +235,11 @@ pub fn execute_workflow(mpi_ifx: &CommIfx, args: &WorkflowArgs) -> Result<()> {
                 let lpuc = puc_dist::PUCDistWorkflow { args, mpi_ifx };
                 lpuc.run()?;
             }
-           RunMode::MISI | RunMode::MISIDist | RunMode::HistDist |
-           RunMode::HistNodes  | RunMode::HistNodes2MISI => {
+            RunMode::MISI
+            | RunMode::MISIDist
+            | RunMode::HistDist
+            | RunMode::HistNodes
+            | RunMode::HistNodes2MISI => {
                 let adata = AnnData::new(&args.h5ad_file, None)?;
                 let rmisi = misiw::MISIWorkFlow {
                     args,
@@ -234,7 +252,9 @@ pub fn execute_workflow(mpi_ifx: &CommIfx, args: &WorkflowArgs) -> Result<()> {
                     RunMode::MISIDist => rmisi.run_misi_dist()?,
                     RunMode::HistDist => rmisi.run_hist()?,
                     RunMode::HistNodes => rmisi.run_hist_nodes()?,
-                    RunMode::HistNodes2MISI => rmisi.run_misi_dist_from_nodes()?,
+                    RunMode::HistNodes2MISI => {
+                        rmisi.run_misi_dist_from_nodes()?
+                    }
                     _ => todo!("Missing mode"),
                 }
             }

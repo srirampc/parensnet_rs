@@ -1,564 +1,18 @@
+use std::path::Path;
+
 use anyhow::{Ok, Result};
-use hdf5::H5Type;
-use mpi::traits::{Communicator, CommunicatorCollectives, Equivalence};
-use ndarray::{Array1, Array2, ArrayView1};
-use num::{FromPrimitive, ToPrimitive};
+use mpi::traits::CommunicatorCollectives;
 use sope::{
-    collective::{all2all_vec, all2allv_vec, allgather_one, allgatherv_full_vec},
-    partition::{ArbitDist, Dist, InterleavedDist},
     reduction::{all_of, allreduce_sum},
     timer::SectionTimer,
-    util::exc_prefix_sum,
-};
-use std::{
-    collections::HashMap, fmt::Debug, iter::zip, marker::PhantomData, ops::Range,
 };
 
-use super::{WorkDistributor, WorkflowArgs};
-use crate::{
-    anndata::AnnData,
-    comm::CommIfx,
-    cond_debug, cond_info,
-    h5::{io, mpio},
-    hist::{HSFloat, bayesian_blocks_bin_edges, histogram_1d, histogram_2d},
-    map_with_result_to_tuple,
-    mvim::imeasures::{
-        lmr_about_x_from_lvji, lmr_about_y_from_lvji, log_jvi_ratio,
-        mi_from_ljvi, si_from_ljvi,
-    },
-    types::{AddFromZero, FromToPrimitive, PNFloat, PNInteger},
-    util::{block_owner, block_range, triu_index_to_pair, triu_pair_to_index},
+use super::{
+    MISIWorkFlowTrait, WorkDistributor, WorkflowArgs,
+    ds::{NodeCollection, OrdPairSICollection, PairMICollection},
+    helpers::MISIWorkFlowHelper,
 };
-
-struct Node<IntT, FloatT> {
-    nbins: IntT,
-    nhist: IntT,
-    bins: Array1<FloatT>,
-    hist: Array1<FloatT>,
-}
-
-impl<IntT, FloatT> Node<IntT, FloatT> {
-    fn new(
-        nbins: IntT,
-        nhist: IntT,
-        bins: Array1<FloatT>,
-        hist: Array1<FloatT>,
-    ) -> Self {
-        Node {
-            nbins,
-            nhist,
-            bins,
-            hist,
-        }
-    }
-
-    fn from_data(c_data: ArrayView1<FloatT>) -> Self
-    where
-        FloatT: 'static + HSFloat,
-        IntT: AddFromZero + FromPrimitive + Clone,
-    {
-        let cbins = bayesian_blocks_bin_edges(c_data);
-        let chist =
-            histogram_1d::<FloatT, FloatT>(c_data, cbins.as_slice().unwrap());
-        Self::new(
-            IntT::from_usize(cbins.len()).unwrap(),
-            IntT::from_usize(chist.len()).unwrap(),
-            cbins,
-            chist,
-        )
-    }
-}
-
-struct NodeCollection<SizeT, IntT, FloatT> {
-    bin_dim: Array1<IntT>,
-    hist_dim: Array1<IntT>,
-    bin_start: Array1<SizeT>,
-    si_start: Array1<SizeT>,
-    hist_start: Array1<SizeT>,
-    nsi: SizeT,
-    // bins/hist flattened to a histogram
-    abins: Array1<FloatT>,
-    ahist: Array1<FloatT>,
-}
-
-impl<SizeT, IntT, FloatT> NodeCollection<SizeT, IntT, FloatT> {
-    fn from_nodes(
-        v_nodes: &[Node<IntT, FloatT>],
-        comm: &dyn Communicator,
-    ) -> Result<Self>
-    where
-        SizeT: 'static + PNInteger + Equivalence,
-        IntT: Clone + Debug + Default + ToPrimitive + Equivalence,
-        FloatT: Clone + Debug + Default + Equivalence,
-    {
-        // bin/hist sizes
-        let bin_dim: Vec<IntT> =
-            v_nodes.iter().map(|x| x.nbins.clone()).collect();
-        let bin_dim: Vec<IntT> = allgatherv_full_vec(&bin_dim, comm)?;
-        let hist_dim: Vec<IntT> =
-            v_nodes.iter().map(|x| x.nhist.clone()).collect();
-        let hist_dim: Vec<IntT> = allgatherv_full_vec(&hist_dim, comm)?;
-
-        // histogram and bin boundaries
-        let vbins: Vec<FloatT> = v_nodes
-            .iter()
-            .flat_map(|x| x.bins.iter().cloned())
-            .collect();
-        let vbins: Vec<FloatT> = allgatherv_full_vec(&vbins, comm)?;
-
-        let vhist: Vec<FloatT> = v_nodes
-            .iter()
-            .flat_map(|x| x.hist.iter().cloned())
-            .collect();
-        let vhist: Vec<FloatT> = allgatherv_full_vec(&vhist, comm)?;
-
-        // Starting positions in the flattened arrays
-        let hist_starts: Vec<SizeT> = exc_prefix_sum(
-            hist_dim
-                .iter()
-                .map(|x| SizeT::from_i64(x.to_i64().unwrap()).unwrap()),
-            SizeT::one(),
-        );
-        let bin_starts: Vec<SizeT> = exc_prefix_sum(
-            bin_dim
-                .iter()
-                .map(|x| SizeT::from_i64(x.to_i64().unwrap()).unwrap()),
-            SizeT::one(),
-        );
-        let si_start: Vec<i64> = exc_prefix_sum(
-            hist_dim.iter().map(|x| x.to_i64().unwrap()),
-            bin_dim.len() as i64,
-        );
-        let si_start: Vec<SizeT> = si_start
-            .into_iter()
-            .map(|x| SizeT::from_i64(x).unwrap())
-            .collect();
-
-        let nsi = hist_dim
-            .iter()
-            .map(|x| x.to_usize().unwrap())
-            .sum::<usize>()
-            * hist_dim.len();
-
-        Ok(Self {
-            bin_dim: Array1::from_vec(bin_dim),
-            hist_dim: Array1::from_vec(hist_dim),
-            hist_start: Array1::from_vec(hist_starts),
-            bin_start: Array1::from_vec(bin_starts),
-            si_start: Array1::from_vec(si_start),
-            abins: Array1::from_vec(vbins),
-            ahist: Array1::from_vec(vhist),
-            nsi: SizeT::from_usize(nsi).unwrap(),
-        })
-    }
-
-    fn from_h5(h5_file: &str) -> Result<Self>
-    where
-        SizeT: H5Type,
-        IntT: H5Type,
-        FloatT: H5Type,
-    {
-        let file = hdf5::File::open(h5_file)?;
-        let data_g = file.group("data")?;
-        // attributes
-        let (_nobs, _nvars, nsi) = map_with_result_to_tuple![
-            |x| io::read_scalar_attr::<SizeT>(&data_g, x) ;
-            "nobs", "nvars", "nsi"
-        ];
-
-        let (hist_start, bin_start, si_start) = map_with_result_to_tuple![
-            |x| data_g.dataset(x)?.read_1d::<SizeT>();
-           "hist_start", "bins_start", "si_start"
-        ];
-
-        let (hist_dim, bin_dim) = map_with_result_to_tuple![
-            |x| data_g.dataset(x)?.read_1d::<IntT>();
-           "hist_dim", "bins_dim"
-        ];
-
-        let (ahist, abins) = map_with_result_to_tuple![
-            |x| data_g.dataset(x)?.read_1d::<FloatT>();
-           "hist", "bins"
-        ];
-
-        Ok(Self {
-            hist_dim,
-            hist_start,
-            bin_dim,
-            bin_start,
-            si_start,
-            nsi,
-            ahist,
-            abins,
-        })
-    }
-
-    fn hist(&self, idx: usize) -> ArrayView1<'_, FloatT>
-    where
-        SizeT: ToPrimitive,
-        IntT: ToPrimitive,
-    {
-        let hstart = self.hist_start[idx].to_usize().unwrap();
-        let hsize = self.hist_dim[idx].to_usize().unwrap();
-        let hend = hstart + hsize;
-        self.ahist.slice(ndarray::s![hstart..hend])
-    }
-
-    fn bins(&self, idx: usize) -> ArrayView1<'_, FloatT>
-    where
-        SizeT: ToPrimitive,
-        IntT: ToPrimitive,
-    {
-        let bstart = self.bin_start[idx].to_usize().unwrap();
-        let bsize = self.bin_dim[idx].to_usize().unwrap();
-        let bend = bstart + bsize;
-        self.abins.slice(ndarray::s![bstart..bend])
-    }
-
-    fn len(&self) -> usize {
-        self.hist_dim.len()
-    }
-
-    fn is_empty(&self) -> bool {
-        self.hist_dim.is_empty()
-    }
-}
-
-struct PairMI<IntT, FloatT> {
-    index: usize,
-    pair: (IntT, IntT),
-    xy_tab: Array2<FloatT>,
-    mi: FloatT,
-}
-
-struct PairMICollection<IntT, FloatT> {
-    index: Vec<usize>,
-    dims: (Vec<IntT>, Vec<IntT>),
-    xy_tab: Array1<FloatT>,
-    mi: Array1<FloatT>,
-}
-
-impl<IntT, FloatT> PairMICollection<IntT, FloatT>
-where
-    IntT: Clone + Default + Debug + Equivalence + FromToPrimitive,
-    FloatT: Clone + Default + Debug + H5Type + Equivalence,
-{
-    fn from_h5(
-        cx: &CommIfx,
-        args: &WorkflowArgs,
-        h5f: &str,
-        hist_dim: &[IntT],
-    ) -> Result<Self> {
-        let mi_dist = InterleavedDist::new(args.npairs, cx.size, cx.rank);
-        let mi = mpio::block_read1d(cx, h5f, "data/mi", Some(&mi_dist))?;
-        let index = mi_dist.range().collect();
-        let dims: (Vec<IntT>, Vec<IntT>) = mi_dist
-            .range()
-            .map(|x| {
-                let (i, j): (usize, usize) = triu_index_to_pair(args.nvars, x);
-                (hist_dim[i].clone(), hist_dim[j].clone())
-            })
-            .collect();
-        let size: usize = zip(dims.0.iter(), dims.1.iter())
-            .map(|(x, y)| (*x).to_usize().unwrap() * (*y).to_usize().unwrap())
-            .sum();
-        let sizes: Vec<usize> = allgather_one(&size, cx.comm())?;
-        let h_dist =
-            ArbitDist::new(sizes.iter().sum::<usize>(), cx.size, cx.rank, sizes);
-        let xy_tab =
-            mpio::block_read1d(cx, h5f, "data/pair_hist", Some(&h_dist))?;
-        Ok(Self {
-            index,
-            dims,
-            xy_tab,
-            mi,
-        })
-    }
-
-    fn from_vec(vdata: &[PairMI<IntT, FloatT>]) -> Self {
-        let index = vdata.iter().map(|x| x.index).collect();
-        let mi = vdata.iter().map(|x| x.mi.clone()).collect();
-        let dims = vdata
-            .iter()
-            .map(|x| {
-                let d = x.xy_tab.shape();
-                (
-                    IntT::from_usize(d[0]).unwrap(),
-                    IntT::from_usize(d[1]).unwrap(),
-                )
-            })
-            .collect::<(Vec<_>, Vec<_>)>();
-        let xy_tab = vdata
-            .iter()
-            .flat_map(|x| x.xy_tab.flatten().to_owned())
-            .collect::<Array1<_>>();
-        Self {
-            index,
-            mi,
-            dims,
-            xy_tab,
-        }
-    }
-
-    fn distribute(&self, mcx: &CommIfx) -> Result<Self> {
-        let npairs: usize = allreduce_sum(&(self.index.len()), mcx.comm());
-        let np = mcx.size as usize;
-        let (snd_pairs, snd_tabs) = self
-            .index
-            .iter()
-            .zip(zip(self.dims.0.iter(), self.dims.1.iter()))
-            .fold(
-                (vec![0usize; np], vec![0usize; np]),
-                |mut sv, (idx, (dx, dy))| {
-                    let p_own = block_owner(*idx, mcx.size, npairs) as usize;
-                    sv.0[p_own] += 1;
-                    let rdim = dx.to_usize().unwrap() * dy.to_usize().unwrap();
-                    sv.1[p_own] += rdim;
-                    sv
-                },
-            );
-        let rcv_pairs = all2all_vec(&snd_pairs, mcx.comm())?;
-        let rcv_tabs = all2all_vec(&snd_tabs, mcx.comm())?;
-
-        let index =
-            all2allv_vec(&self.index[..], &snd_pairs, &rcv_pairs, mcx.comm())?;
-        let dims_x =
-            all2allv_vec(&self.dims.0[..], &snd_pairs, &rcv_pairs, mcx.comm())?;
-        let dims_y =
-            all2allv_vec(&self.dims.1[..], &snd_pairs, &rcv_pairs, mcx.comm())?;
-        let mi = all2allv_vec(
-            self.mi.as_slice().unwrap(),
-            &snd_pairs,
-            &rcv_pairs,
-            mcx.comm(),
-        )?;
-        let xy_tab = all2allv_vec(
-            self.xy_tab.as_slice().unwrap(),
-            &snd_tabs,
-            &rcv_tabs,
-            mcx.comm(),
-        )?;
-
-        Ok(Self {
-            index,
-            dims: (dims_x, dims_y),
-            mi: Array1::from_vec(mi),
-            xy_tab: Array1::from_vec(xy_tab),
-        })
-    }
-}
-
-struct OrdPairSI<IntT, FloatT> {
-    about: IntT,
-    by: IntT,
-    si: Array1<FloatT>,
-    lmr: Array1<FloatT>,
-}
-
-struct OrdPairSICollection<IntT, FloatT> {
-    nvars: usize,
-    nord_pairs: usize,
-    n_si: usize,
-    about: Vec<IntT>,
-    by: Vec<IntT>,
-    sizes: Vec<IntT>,
-    si: Array1<FloatT>,
-    lmr: Array1<FloatT>,
-}
-
-impl<IntT, FloatT> OrdPairSICollection<IntT, FloatT>
-where
-    IntT: Clone + Default + Debug + Equivalence + FromToPrimitive,
-    FloatT: Clone + Default + Debug + Equivalence,
-{
-    fn from_vec(hist_dim: &[IntT], vdata: &[OrdPairSI<IntT, FloatT>]) -> Self {
-        let nvars = hist_dim.len();
-        let about: Vec<IntT> = vdata.iter().map(|x| x.about.clone()).collect();
-        let by: Vec<IntT> = vdata.iter().map(|x| x.by.clone()).collect();
-        let sizes: Vec<IntT> = vdata
-            .iter()
-            .map(|x| IntT::from_usize(x.si.len()))
-            .collect::<Option<Vec<_>>>()
-            .unwrap();
-        let si = vdata
-            .iter()
-            .flat_map(|x| x.si.to_owned())
-            .collect::<Array1<_>>();
-        let lmr = vdata
-            .iter()
-            .flat_map(|x| x.lmr.to_owned())
-            .collect::<Array1<_>>();
-        let n_si: usize = about.iter().map(|x| x.to_usize().unwrap()).sum();
-        Self {
-            nvars,
-            nord_pairs: nvars * nvars,
-            n_si,
-            about,
-            by,
-            sizes,
-            si,
-            lmr,
-        }
-    }
-
-    fn distribute(&self, mcx: &CommIfx) -> Result<Self> {
-        let np = mcx.size as usize;
-        let (snd_pairs, snd_si) = self
-            .sizes
-            .iter()
-            .zip(zip(self.about.iter(), self.by.iter()))
-            .fold(
-                (vec![0usize; np], vec![0usize; np]),
-                |mut sv, (sz, (a, b))| {
-                    let (ua, ub) = (a.to_usize().unwrap(), b.to_usize().unwrap());
-                    // NOTE: using number of ordered pairs.
-                    let idx = ua * self.nvars + ub;
-                    let p_own =
-                        block_owner(idx, mcx.size, self.nord_pairs) as usize;
-                    sv.0[p_own] += 1;
-                    sv.1[p_own] += sz.to_usize().unwrap();
-                    sv
-                },
-            );
-        let rcv_pairs = all2all_vec(&snd_pairs, mcx.comm())?;
-        let rcv_si = all2all_vec(&snd_si, mcx.comm())?;
-
-        let about =
-            all2allv_vec(&self.about[..], &snd_pairs, &rcv_pairs, mcx.comm())?;
-        let by = all2allv_vec(&self.by[..], &snd_pairs, &rcv_pairs, mcx.comm())?;
-        let sizes =
-            all2allv_vec(&self.sizes[..], &snd_pairs, &rcv_pairs, mcx.comm())?;
-        let si = all2allv_vec(
-            self.si.as_slice().unwrap(),
-            &snd_si,
-            &rcv_si,
-            mcx.comm(),
-        )?;
-        let lmr = all2allv_vec(
-            self.lmr.as_slice().unwrap(),
-            &snd_si,
-            &rcv_si,
-            mcx.comm(),
-        )?;
-        let n_si: usize = about.iter().map(|x| x.to_usize().unwrap()).sum();
-
-        Ok(Self {
-            nvars: self.nvars,
-            nord_pairs: self.nord_pairs,
-            n_si,
-            about,
-            by,
-            sizes,
-            si: Array1::from_vec(si),
-            lmr: Array1::from_vec(lmr),
-        })
-    }
-
-    fn pairs_lookup(&self) -> HashMap<usize, (usize, usize)> {
-        let mut p_lookup =
-            HashMap::<usize, (usize, usize)>::with_capacity(self.about.len());
-        // Should this be pairs ?
-        let mut offset = 0;
-        for (i, (a, b)) in zip(self.about.iter(), self.by.iter()).enumerate() {
-            let tgt_index =
-                a.to_usize().unwrap() * self.nvars + b.to_usize().unwrap();
-            p_lookup.insert(tgt_index, (i, offset));
-            offset += self.sizes[i].to_usize().unwrap();
-        }
-        assert!(offset == self.si.len());
-        assert!(offset == self.lmr.len());
-        p_lookup
-    }
-
-    fn fill_diag(&mut self, hist_dim: &[IntT], mcx: &CommIfx) {
-        //  Initialize array with the allocated ordered pairs
-        let brg = block_range(mcx.rank, mcx.size, self.nord_pairs);
-        let about = brg.clone().map(|idx| idx / self.nvars).collect::<Vec<_>>();
-        let by = brg.clone().map(|idx| idx % self.nvars).collect::<Vec<_>>();
-        let n_si: usize = about
-            .iter()
-            .map(|x| hist_dim[x.to_usize().unwrap()].to_usize().unwrap())
-            .sum();
-
-        // Pairs Lookup
-        let lookup = self.pairs_lookup();
-        let si_slice = self.si.as_slice().unwrap();
-        let lmr_slice = self.lmr.as_slice().unwrap();
-
-        let mut sizes: Vec<IntT> = vec![IntT::default(); about.len()];
-        let mut si: Vec<FloatT> = vec![FloatT::default(); n_si];
-        let mut lmr: Vec<FloatT> = vec![FloatT::default(); n_si];
-        let mut offset: usize = 0;
-        for (i, (x, y)) in zip(about.iter(), by.iter()).enumerate() {
-            let h_dim = hist_dim[x.to_usize().unwrap()].clone();
-            let x_dim = h_dim.to_usize().unwrap();
-            let sir = offset..(offset + x_dim);
-            if x != y {
-                let op_idx = x * self.nvars + y;
-                if let Some(vx) = lookup.get(&op_idx) {
-                    let fmr = vx.1..(vx.1 + x_dim);
-                    let s_in = &si_slice[fmr.clone()];
-                    si[sir.clone()].clone_from_slice(s_in);
-                    lmr[sir].clone_from_slice(&lmr_slice[fmr]);
-                }
-            }
-            sizes[i] = h_dim;
-            offset += x_dim;
-        }
-
-        // TODO::
-        self.n_si = n_si;
-        self.about = about
-            .into_iter()
-            .map(|x| IntT::from_usize(x).unwrap())
-            .collect();
-        self.by = by
-            .into_iter()
-            .map(|x| IntT::from_usize(x).unwrap())
-            .collect();
-        self.si = Array1::from_vec(si);
-        self.lmr = Array1::from_vec(lmr);
-        self.sizes = sizes;
-    }
-}
-
-// aliases to
-type NodePair<IntT, FloatT> = (
-    OrdPairSI<IntT, FloatT>,
-    OrdPairSI<IntT, FloatT>,
-    PairMI<IntT, FloatT>,
-);
-
-type BatchPairs<IntT, FloatT> = (
-    Vec<OrdPairSI<IntT, FloatT>>,
-    Vec<OrdPairSI<IntT, FloatT>>,
-    Vec<PairMI<IntT, FloatT>>,
-);
-
-trait BPTrait<IntT, FloatT> {
-    fn new(rows: Range<usize>, cols: Range<usize>) -> Self;
-    fn push(&mut self, node_pair: NodePair<IntT, FloatT>);
-}
-
-impl<IntT, FloatT> BPTrait<IntT, FloatT> for BatchPairs<IntT, FloatT> {
-    fn new(rows: Range<usize>, cols: Range<usize>) -> Self {
-        let npairs: usize = rows
-            .map(|row| cols.clone().filter(|col| row < *col).sum::<usize>())
-            .sum();
-        (
-            Vec::with_capacity(npairs),
-            Vec::with_capacity(npairs),
-            Vec::with_capacity(npairs),
-        )
-    }
-
-    fn push(&mut self, node_pair: NodePair<IntT, FloatT>) {
-        let (s0, s1, m) = node_pair;
-        self.0.push(s0);
-        self.1.push(s1);
-        self.2.push(m);
-    }
-}
+use crate::{anndata::AnnData, comm::CommIfx, cond_info};
 
 pub struct MISIWorkFlow<'a> {
     pub mpi_ifx: &'a CommIfx,
@@ -567,431 +21,21 @@ pub struct MISIWorkFlow<'a> {
     pub adata: &'a AnnData,
 }
 
-struct MISIWorkFlowHelper<SizeT, IntT, FloatT> {
-    _a: PhantomData<(SizeT, IntT, FloatT)>,
-}
-
-type NodePairCollection<IntT, FloatT> = (
-    OrdPairSICollection<IntT, FloatT>,
-    PairMICollection<IntT, FloatT>,
-);
-
-impl<SizeT, IntT, FloatT> MISIWorkFlowHelper<SizeT, IntT, FloatT>
-where
-    SizeT: 'static + PNInteger + H5Type + Default + Equivalence,
-    IntT: PNInteger + H5Type + Default + Equivalence,
-    FloatT: 'static + PNFloat + H5Type + Default + Equivalence,
-{
-    fn construct_nodes(
-        wf: &MISIWorkFlow,
-        rank: i32,
-    ) -> Result<NodeCollection<SizeT, IntT, FloatT>> {
-        let mut s_timer = SectionTimer::from_comm(wf.mpi_ifx.comm(), ",");
-        let columns = wf.wdistr.var_dist[rank as usize].clone();
-        let rdata = wf.adata.read_range_data_around::<FloatT>(
-            columns.clone(),
-            wf.args.nroundup,
-        )?;
-        let var_data: Vec<Node<IntT, FloatT>> = columns
-            .into_iter()
-            .enumerate()
-            .map(|(i, _cx)| Node::<IntT, FloatT>::from_data(rdata.column(i)))
-            .collect();
-        log::debug!("At Rank {} Built {} nodes", wf.mpi_ifx.rank, var_data.len());
-        if log::log_enabled!(log::Level::Info) {
-            s_timer.info_section("Local Nodes Construction ");
-            let n_nodes = allreduce_sum(&(var_data.len()), wf.mpi_ifx.comm());
-            cond_info!(
-                wf.mpi_ifx.is_root(); "Total nodes: {} ", n_nodes
-            );
-            s_timer.reset();
-        }
-        let nodes = NodeCollection::<SizeT, IntT, FloatT>::from_nodes(
-            &var_data,
-            wf.mpi_ifx.comm(),
-        )?;
-        if log::log_enabled!(log::Level::Info) {
-            s_timer.info_section("Nodes Collection");
-            cond_info!(
-                wf.mpi_ifx.is_root(); "Collected nodes: {} ", nodes.len()
-            );
-            s_timer.reset();
-        }
-        if log::log_enabled!(log::Level::Debug) {
-            wf.mpi_ifx.comm().barrier();
-            cond_debug!(wf.mpi_ifx.is_root(); "Collected {} Nodes", nodes.len());
-        }
-        Ok(nodes)
+impl<'a> MISIWorkFlowTrait<'a> for MISIWorkFlow<'a> {
+    fn comm_ifx(&self) -> &'a CommIfx {
+        self.mpi_ifx
     }
 
-    fn compute_hist_node_pair(
-        nodes: &NodeCollection<SizeT, IntT, FloatT>,
-        indices: (usize, usize),
-        rcdata: (ArrayView1<FloatT>, ArrayView1<FloatT>),
-    ) -> Array2<FloatT> {
-        let (x_idx, y_idx) = indices;
-        let (x_data, y_data) = rcdata;
-        let (x_bins, y_bins) = (nodes.bins(x_idx), nodes.bins(y_idx));
-        histogram_2d(
-            x_data,
-            x_bins.as_slice().unwrap(),
-            y_data,
-            y_bins.as_slice().unwrap(),
-        )
+    fn wf_dist(&self) -> &'a WorkDistributor {
+        self.wdistr
     }
 
-    fn compute_lmr_node_pair(
-        nodes: &NodeCollection<SizeT, IntT, FloatT>,
-        indices: (usize, usize),
-        args: &WorkflowArgs,
-        xy_tab: Array2<FloatT>,
-    ) -> NodePair<IntT, FloatT> {
-        let (x_idx, y_idx) = indices;
-        let (x_hist, y_hist) = (nodes.hist(x_idx), nodes.hist(y_idx));
-        let tbase = args.tbase.clone();
-        let nobs = FloatT::from_usize(args.nobs).unwrap();
-        let ljvi_ratio =
-            log_jvi_ratio(xy_tab.view(), x_hist, y_hist, tbase, nobs);
-        let (x_lmr, y_lmr) = (
-            lmr_about_x_from_lvji(ljvi_ratio.view(), xy_tab.view(), Some(nobs)),
-            lmr_about_y_from_lvji(ljvi_ratio.view(), xy_tab.view(), Some(nobs)),
-        );
-        let (x_si, y_si) = si_from_ljvi(
-            ljvi_ratio.view(),
-            xy_tab.view(),
-            x_hist.view(),
-            y_hist.view(),
-        );
-        let mi = mi_from_ljvi(ljvi_ratio.view(), xy_tab.view(), Some(nobs));
-        let index = triu_pair_to_index(args.nvars, x_idx, y_idx);
-        let pair = (
-            IntT::from_usize(x_idx).unwrap(),
-            IntT::from_usize(y_idx).unwrap(),
-        );
-
-        (
-            OrdPairSI {
-                about: pair.0,
-                by: pair.1,
-                si: x_si,
-                lmr: x_lmr,
-            },
-            OrdPairSI {
-                about: pair.1,
-                by: pair.0,
-                si: y_si,
-                lmr: y_lmr,
-            },
-            PairMI::<IntT, FloatT> {
-                index,
-                pair,
-                xy_tab,
-                mi,
-            },
-        )
+    fn wf_args(&self) -> &'a WorkflowArgs {
+        self.args
     }
 
-    fn build_node_pair(
-        nodes: &NodeCollection<SizeT, IntT, FloatT>,
-        indices: (usize, usize),
-        rcdata: (ArrayView1<FloatT>, ArrayView1<FloatT>),
-        args: &WorkflowArgs,
-    ) -> NodePair<IntT, FloatT> {
-        let xy_tab = Self::compute_hist_node_pair(nodes, indices, rcdata);
-        Self::compute_lmr_node_pair(nodes, indices, args, xy_tab)
-    }
-
-    fn load_batch_data(
-        wf: &MISIWorkFlow,
-        rank: i32,
-        bidx: usize,
-    ) -> Result<(Array2<FloatT>, Array2<FloatT>)> {
-        let (rows, cols) = wf.wdistr.pairs_2d().batch_range(bidx, rank);
-        Ok((
-            wf.adata.read_range_data_around::<FloatT>(
-                rows.clone(),
-                wf.args.nroundup,
-            )?,
-            wf.adata.read_range_data_around::<FloatT>(
-                cols.clone(),
-                wf.args.nroundup,
-            )?,
-        ))
-    }
-
-    fn construct_hist_node_pairs_for_batch(
-        wf: &MISIWorkFlow,
-        rank: i32,
-        bidx: usize,
-        nodes: &NodeCollection<SizeT, IntT, FloatT>,
-    ) -> Result<Vec<PairMI<IntT, FloatT>>> {
-        let (row_data, col_data) = Self::load_batch_data(wf, rank, bidx)?;
-        let (rows, cols) = wf.wdistr.pairs_2d().batch_range(bidx, rank);
-        let mut v_hist: Vec<PairMI<IntT, FloatT>> = Vec::new();
-        for (i, rx) in rows.clone().enumerate() {
-            let r_data = row_data.column(i);
-            for (j, cx) in cols.clone().enumerate() {
-                if rx < cx {
-                    let c_data = col_data.column(j);
-                    let index = triu_pair_to_index(wf.args.nvars, rx, cx);
-                    let hist = Self::compute_hist_node_pair(
-                        nodes,
-                        (rx, cx),
-                        (r_data, c_data),
-                    );
-                    v_hist.push(PairMI::<IntT, FloatT> {
-                        mi: FloatT::zero(),
-                        index,
-                        pair: (
-                            IntT::from_usize(rx).unwrap(),
-                            IntT::from_usize(cx).unwrap(),
-                        ),
-                        xy_tab: hist,
-                    });
-                }
-            }
-        }
-        if log::log_enabled!(log::Level::Debug) {
-            // wf.mpi_ifx.comm().barrier();
-            let n_hist = allreduce_sum(&(v_hist.len()), wf.mpi_ifx.comm());
-            cond_debug!(
-                wf.mpi_ifx.is_root(); "Built Batch {} with : {} ", bidx, n_hist
-            );
-        }
-        Ok(v_hist)
-    }
-
-    fn construct_node_pairs_for_batch(
-        wf: &MISIWorkFlow,
-        rank: i32,
-        bidx: usize,
-        nodes: &NodeCollection<SizeT, IntT, FloatT>,
-    ) -> Result<BatchPairs<IntT, FloatT>> {
-        let (rows, cols) = wf.wdistr.pairs_2d().batch_range(bidx, rank);
-        let (row_data, col_data) = Self::load_batch_data(wf, rank, bidx)?;
-        let mut batch_pairs =
-            BatchPairs::<IntT, FloatT>::new(rows.clone(), cols.clone());
-        for (i, rx) in rows.clone().enumerate() {
-            let r_data = row_data.column(i);
-            for (j, cx) in cols.clone().enumerate() {
-                if rx < cx {
-                    let c_data = col_data.column(j);
-                    batch_pairs.push(Self::build_node_pair(
-                        nodes,
-                        (rx, cx),
-                        (r_data, c_data),
-                        wf.args,
-                    ));
-                }
-            }
-        }
-
-        Ok(batch_pairs)
-    }
-
-    fn construct_hist_node_pairs(
-        wf: &MISIWorkFlow,
-        rank: i32,
-        nodes: &NodeCollection<SizeT, IntT, FloatT>,
-    ) -> Result<PairMICollection<IntT, FloatT>> {
-        let nbatches = wf.wdistr.pairs_2d().num_batches();
-
-        let v_hist = (0..nbatches)
-            .map(|bidx| {
-                Self::construct_hist_node_pairs_for_batch(wf, rank, bidx, nodes)
-            })
-            .collect::<Result<Vec<_>>>()?;
-
-        // flatten
-        let mut v_hist: Vec<_> = v_hist.into_iter().flatten().collect();
-        v_hist.sort_by_key(|x| x.index);
-        if log::log_enabled!(log::Level::Debug) {
-            wf.mpi_ifx.comm().barrier();
-            let n_hist = allreduce_sum(&(v_hist.len()), wf.mpi_ifx.comm());
-            cond_debug!(
-                wf.mpi_ifx.is_root(); "Built Hist : {} ", n_hist
-            );
-        }
-
-        let v_hist = PairMICollection::<IntT, FloatT>::from_vec(&v_hist);
-        Ok(v_hist)
-    }
-
-    fn construct_node_pairs_in_batches(
-        wf: &MISIWorkFlow,
-        rank: i32,
-        nodes: &NodeCollection<SizeT, IntT, FloatT>,
-    ) -> Result<NodePairCollection<IntT, FloatT>> {
-        let nbatches = wf.wdistr.pairs_2d().num_batches();
-
-        let (v_si, v_siy, v_pmi) = (0..nbatches)
-            .map(|bidx| {
-                Self::construct_node_pairs_for_batch(wf, rank, bidx, nodes)
-            })
-            .collect::<Result<(Vec<_>, Vec<_>, Vec<_>)>>()?;
-
-        // flatten all vec of vec
-        let v_pmi: Vec<PairMI<IntT, FloatT>> =
-            v_pmi.into_iter().flatten().collect();
-
-        let v_si: Vec<OrdPairSI<IntT, FloatT>> =
-            v_si.into_iter().flatten().collect();
-        let v_siy: Vec<OrdPairSI<IntT, FloatT>> =
-            v_siy.into_iter().flatten().collect();
-        Self::construct_node_pairs_collection(
-            wf.mpi_ifx, nodes, v_pmi, v_si, v_siy,
-        )
-    }
-
-    fn construct_node_pairs_collection(
-        mpi_ifx: &CommIfx,
-        nodes: &NodeCollection<SizeT, IntT, FloatT>,
-        mut v_pmi: Vec<PairMI<IntT, FloatT>>,
-        mut v_si: Vec<OrdPairSI<IntT, FloatT>>,
-        v_siy: Vec<OrdPairSI<IntT, FloatT>>,
-    ) -> Result<NodePairCollection<IntT, FloatT>> {
-        v_pmi.sort_by_key(|x| x.pair);
-        v_si.extend(v_siy);
-        v_si.sort_by_key(|x| (x.about, x.by));
-        log::debug!(
-            "At Rank {} :: Built MI {} and SI {}",
-            mpi_ifx.rank,
-            v_pmi.len(),
-            v_si.len()
-        );
-        if log::log_enabled!(log::Level::Debug) {
-            mpi_ifx.comm().barrier();
-            let n_mi = allreduce_sum(&(v_pmi.len()), mpi_ifx.comm());
-            let n_si = allreduce_sum(&(v_si.len()), mpi_ifx.comm());
-            cond_debug!(
-                mpi_ifx.is_root(); "Built MI : {} & SI : {} ", n_mi, n_si
-            );
-        }
-
-        let v_si = OrdPairSICollection::<IntT, FloatT>::from_vec(
-            nodes.hist_dim.as_slice().unwrap(),
-            &v_si,
-        );
-        let v_pmi = PairMICollection::<IntT, FloatT>::from_vec(&v_pmi);
-        if log::log_enabled!(log::Level::Debug) {
-            mpi_ifx.comm().barrier();
-            let n_mi = allreduce_sum(&(v_pmi.index.len()), mpi_ifx.comm());
-            let n_si = allreduce_sum(&(v_si.about.len()), mpi_ifx.comm());
-            cond_debug!(
-                mpi_ifx.is_root(); "Collected {} MI & {} SI", n_mi, n_si
-            );
-        }
-        Ok((v_si, v_pmi))
-    }
-
-    fn construct_lmr_node_pairs(
-        wf: &MISIWorkFlow,
-        nodes: &NodeCollection<SizeT, IntT, FloatT>,
-        hist_pairs: PairMICollection<IntT, FloatT>,
-    ) -> Result<NodePairCollection<IntT, FloatT>> {
-        let dims_itr = zip(hist_pairs.dims.0.iter(), hist_pairs.dims.1.iter());
-        let offset_itr = zip(hist_pairs.dims.0.iter(), hist_pairs.dims.1.iter())
-            .scan(0usize, |state, (dim_x, dim_y)| {
-                let cx = *state;
-                *state += dim_x.to_usize().unwrap() * dim_y.to_usize().unwrap();
-                Some(cx)
-            });
-
-        let sl_xytab = hist_pairs.xy_tab.as_slice().unwrap();
-        let (v_si, v_siy, v_pmi) = zip(hist_pairs.index.iter(), offset_itr)
-            .zip(dims_itr)
-            .map(|((idx, offset), (x_dim, y_dim))| {
-                let (i, j) = triu_index_to_pair(wf.args.nvars, *idx);
-                let (x_dim, y_dim) =
-                    (x_dim.to_usize().unwrap(), y_dim.to_usize().unwrap());
-                let xy_dim = x_dim * y_dim;
-                let xyt_vec = sl_xytab[offset..(offset + xy_dim)].to_vec();
-                let xy_tab = Array2::from_shape_vec((x_dim, y_dim), xyt_vec)?;
-                Ok(Self::compute_lmr_node_pair(nodes, (i, j), wf.args, xy_tab))
-            })
-            .collect::<Result<(Vec<_>, Vec<_>, Vec<_>)>>()?;
-        Self::construct_node_pairs_collection(
-            wf.mpi_ifx, nodes, v_pmi, v_si, v_siy,
-        )
-    }
-
-    fn write_nodes_h5(
-        wf: &MISIWorkFlow,
-        nodes: &NodeCollection<SizeT, IntT, FloatT>,
-        misi_data_file: &str,
-    ) -> Result<()> {
-        let hfptr = io::create_file(misi_data_file)?;
-        let data_group = hfptr.create_group("data")?;
-        data_group
-            .new_attr::<SizeT>()
-            .create("nvars")?
-            .write_scalar(&(SizeT::from_usize(wf.adata.nvars).unwrap()))?;
-        data_group
-            .new_attr::<SizeT>()
-            .create("nobs")?
-            .write_scalar(&(SizeT::from_usize(wf.adata.nobs).unwrap()))?;
-        data_group
-            .new_attr::<SizeT>()
-            .create("npairs")?
-            .write_scalar(&(SizeT::from_usize(wf.adata.npairs).unwrap()))?;
-        data_group
-            .new_attr::<SizeT>()
-            .create("nsi")?
-            .write_scalar(&nodes.nsi)?;
-
-        io::write_1d(&data_group, "hist_dim", &nodes.hist_dim)?;
-        io::write_1d(&data_group, "hist_start", &nodes.hist_start)?;
-        io::write_1d(&data_group, "hist", &nodes.ahist)?;
-
-        io::write_1d(&data_group, "bins_dim", &nodes.bin_dim)?;
-        io::write_1d(&data_group, "bins_start", &nodes.bin_start)?;
-        io::write_1d(&data_group, "bins", &nodes.abins)?;
-
-        io::write_1d(&data_group, "si_start", &nodes.si_start)?;
-        Ok(())
-    }
-
-    fn write_hist_pairs(
-        w: &MISIWorkFlow,
-        hist_pairs: &PairMICollection<IntT, FloatT>,
-        hist_data_file: &str,
-    ) -> Result<()> {
-        let rank_out_file = format!("{}.{:04}.{}",
-            hist_data_file.strip_suffix(".h5").unwrap_or_default(),
-            w.mpi_ifx.rank, 
-            "h5");
-        let h5_fptr = io::create_file(&rank_out_file)?;
-        let data_group = h5_fptr.create_group("data")?;
-        io::write_1d(
-            //w.mpi_ifx,
-            &data_group,
-            "pair_hist",
-            &hist_pairs.xy_tab,
-        )?;
-        io::write_1d(&data_group, "mi", &hist_pairs.mi)?;
-        //mpio::write_1d(
-        //    w.mpi_ifx,
-        //    &data_group,
-        //    "pair_hist",
-        //    &hist_pairs.xy_tab,
-        //)?;
-        //mpio::block_write1d(w.mpi_ifx, &data_group, "mi", &hist_pairs.mi)?;
-        h5_fptr.close()?;
-        Ok(())
-    }
-
-    fn write_node_pairs(
-        w: &MISIWorkFlow,
-        npairs_si: &OrdPairSICollection<IntT, FloatT>,
-        npairs_mi: &PairMICollection<IntT, FloatT>,
-    ) -> Result<()> {
-        let h5_fptr = mpio::open_file_rw(w.mpi_ifx, &w.args.misi_data_file)?;
-        let data_group = h5_fptr.group("data")?;
-        //TODO::
-        mpio::block_write1d(w.mpi_ifx, &data_group, "mi", &npairs_mi.mi)?;
-        mpio::block_write1d(w.mpi_ifx, &data_group, "si", &npairs_si.si)?;
-        mpio::block_write1d(w.mpi_ifx, &data_group, "lmr", &npairs_si.lmr)?;
-        Ok(())
+    fn ann_data(&self) -> &'a AnnData {
+        self.adata
     }
 }
 
@@ -1004,7 +48,8 @@ impl<'a> MISIWorkFlow<'a> {
     ) -> Result<()> {
         type HelperT = MISIWorkFlowHelper<i64, i32, f32>;
         let mut s_timer = SectionTimer::from_comm(self.mpi_ifx.comm(), ",");
-        let npairs_mi = npairs_mi.distribute(self.mpi_ifx)?;
+        let npairs_mi = npairs_mi
+            .distribute(self.mpi_ifx, nodes.hist_dim.as_slice().unwrap())?;
         if log::log_enabled!(log::Level::Info) {
             s_timer.info_section("Node Pairs MI Distribution");
             let n_mi =
@@ -1063,7 +108,11 @@ impl<'a> MISIWorkFlow<'a> {
         let mut s_timer = SectionTimer::from_comm(self.mpi_ifx.comm(), ",");
         cond_info!(self.mpi_ifx.is_root(); "Starting MISIWorkFlow::Run");
 
-        let nodes = HelperT::construct_nodes(self, self.mpi_ifx.rank)?;
+        let nodes = if Path::new(&self.args.hist_data_file).exists() {
+            NodeCollection::<i64, i32, f32>::from_h5(&self.args.hist_data_file)?
+        } else {
+            HelperT::construct_nodes(self, self.mpi_ifx.rank)?
+        };
         if log::log_enabled!(log::Level::Info) {
             s_timer.info_section("Construct Nodes");
             cond_info!(
@@ -1145,7 +194,8 @@ impl<'a> MISIWorkFlow<'a> {
             s_timer.reset();
         }
 
-        let hist_pairs = hist_pairs.distribute(self.mpi_ifx)?;
+        let hist_pairs = hist_pairs
+            .distribute(self.mpi_ifx, nodes.hist_dim.as_slice().unwrap())?;
         if log::log_enabled!(log::Level::Info) {
             s_timer.info_section("Node Pairs Distribution");
             let n_mi =
@@ -1157,7 +207,8 @@ impl<'a> MISIWorkFlow<'a> {
         }
 
         let write_sucess = if self.mpi_ifx.rank == 0 {
-            match HelperT::write_nodes_h5(self, &nodes, &self.args.hist_data_file) {
+            match HelperT::write_nodes_h5(self, &nodes, &self.args.hist_data_file)
+            {
                 Err(err) => {
                     log::error!("Error in writing nodes : {}", err);
                     all_of(false, self.mpi_ifx.comm())
@@ -1189,27 +240,32 @@ impl<'a> MISIWorkFlow<'a> {
     ) -> Result<()> {
         type HelperT = MISIWorkFlowHelper<i64, i32, f32>;
         let mut s_timer = SectionTimer::from_comm(self.mpi_ifx.comm(), ",");
-        let (npairs_si, npairs_mi) =
-            HelperT::construct_lmr_node_pairs(self, &nodes, hist_pairs)?;
-        if log::log_enabled!(log::Level::Info) {
-            s_timer.info_section("Construct LMR Pairs");
-            let n_mi =
-                allreduce_sum(&(npairs_mi.index.len()), self.mpi_ifx.comm());
-            let n_si =
-                allreduce_sum(&(npairs_si.about.len()), self.mpi_ifx.comm());
-            self.mpi_ifx.comm().barrier();
-            cond_info!(
-                self.mpi_ifx.is_root(); "MI Size: {} SI Size: {}", n_mi, n_si
-            );
-            s_timer.reset();
-        }
+        if let Some((npairs_si, npairs_mi)) =
+            HelperT::construct_lmr_node_pairs(self, &nodes, hist_pairs)?
+        {
+            if log::log_enabled!(log::Level::Info) {
+                s_timer.info_section("Construct LMR Pairs");
+                let n_mi =
+                    allreduce_sum(&(npairs_mi.index.len()), self.mpi_ifx.comm());
+                let n_si =
+                    allreduce_sum(&(npairs_si.about.len()), self.mpi_ifx.comm());
+                self.mpi_ifx.comm().barrier();
+                cond_info!(
+                    self.mpi_ifx.is_root(); "MI Size: {} SI Size: {}", n_mi, n_si
+                );
+                s_timer.reset();
+            }
 
-        self.save_distribute(nodes, npairs_si, npairs_mi)
+            self.save_distribute(nodes, npairs_si, npairs_mi)
+        } else {
+            Ok(())
+        }
     }
 
     pub fn run_misi_dist(&self) -> Result<()> {
         type HelperT = MISIWorkFlowHelper<i64, i32, f32>;
         cond_info!(self.mpi_ifx.is_root(); "Starting MISIWorkFlow::Run MISI Dist");
+        assert!(!self.args.lmr_only);
         // 1. Flat loading of  all the nodes
         let mut s_timer = SectionTimer::from_comm(self.mpi_ifx.comm(), ",");
         let nodes =
@@ -1278,7 +334,8 @@ impl<'a> MISIWorkFlow<'a> {
             s_timer.reset();
         }
 
-        let hist_pairs = hist_pairs.distribute(self.mpi_ifx)?;
+        let hist_pairs = hist_pairs
+            .distribute(self.mpi_ifx, nodes.hist_dim.as_slice().unwrap())?;
         if log::log_enabled!(log::Level::Info) {
             s_timer.info_section("Node Pairs Distribution");
             let n_mi =
