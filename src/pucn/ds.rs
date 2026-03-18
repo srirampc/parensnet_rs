@@ -11,7 +11,7 @@ use sope::{
 };
 use std::{collections::HashMap, fmt::Debug, iter::zip, ops::Range};
 
-use super::{WorkflowArgs};
+use super::WorkflowArgs;
 use crate::{
     comm::CommIfx,
     h5::{io, mpio},
@@ -143,9 +143,9 @@ impl<SizeT, IntT, FloatT> NodeCollection<SizeT, IntT, FloatT> {
         })
     }
 
-    pub fn from_h5(h5_file: &str) -> Result<Self>
+    pub fn from_h5(h5_file: &str, nvars: usize) -> Result<Self>
     where
-        SizeT: H5Type,
+        SizeT: H5Type + ToPrimitive,
         IntT: H5Type,
         FloatT: H5Type,
     {
@@ -171,6 +171,20 @@ impl<SizeT, IntT, FloatT> NodeCollection<SizeT, IntT, FloatT> {
             |x| data_g.dataset(x)?.read_1d::<FloatT>();
            "hist", "bins"
         ];
+
+        // Restrict nvars
+        let (hist_start, bin_start, si_start, hist_dim, bin_dim) =
+            if nvars > 1 && nvars < _nvars.to_usize().unwrap() {
+                (
+                    hist_start.slice_move(ndarray::s![..nvars]),
+                    bin_start.slice_move(ndarray::s![..nvars]),
+                    si_start.slice_move(ndarray::s![..nvars]),
+                    hist_dim.slice_move(ndarray::s![..nvars]),
+                    bin_dim.slice_move(ndarray::s![..nvars]),
+                )
+            } else {
+                (hist_start, bin_start, si_start, hist_dim, bin_dim)
+            };
 
         Ok(Self {
             hist_dim,
@@ -384,7 +398,6 @@ pub(super) struct OrdPairSI<IntT, FloatT> {
 pub(super) struct OrdPairSICollection<IntT, FloatT> {
     pub nvars: usize,
     pub nord_pairs: usize,
-    pub n_si: usize,
     pub about: Vec<IntT>,
     pub by: Vec<IntT>,
     pub sizes: Vec<IntT>,
@@ -397,8 +410,10 @@ where
     IntT: Clone + Default + Debug + Equivalence + FromToPrimitive,
     FloatT: Clone + Default + Debug + Equivalence + Zero,
 {
-    pub fn from_vec(hist_dim: &[IntT], vdata: &[OrdPairSI<IntT, FloatT>]) -> Self {
-        let nvars = hist_dim.len();
+    pub fn from_vec(
+        nvars: usize,
+        vdata: &[OrdPairSI<IntT, FloatT>],
+    ) -> Self {
         let about: Vec<IntT> = vdata.iter().map(|x| x.about.clone()).collect();
         let by: Vec<IntT> = vdata.iter().map(|x| x.by.clone()).collect();
         let sizes: Vec<IntT> = vdata
@@ -426,11 +441,10 @@ where
             .iter()
             .flat_map(|x| x.lmr.to_owned())
             .collect::<Array1<_>>();
-        let n_si: usize = about.iter().map(|x| x.to_usize().unwrap()).sum();
+
         Self {
             nvars,
             nord_pairs: nvars * nvars,
-            n_si,
             about,
             by,
             sizes,
@@ -482,12 +496,10 @@ where
             &rcv_si,
             mcx.comm(),
         )?;
-        let n_si: usize = about.iter().map(|x| x.to_usize().unwrap()).sum();
 
         Ok(Self {
             nvars: self.nvars,
             nord_pairs: self.nord_pairs,
-            n_si,
             about,
             by,
             sizes,
@@ -550,8 +562,6 @@ where
             offset += x_dim;
         }
 
-        // TODO::
-        self.n_si = n_si;
         self.about = about
             .into_iter()
             .map(|x| IntT::from_usize(x).unwrap())
@@ -604,11 +614,7 @@ impl<IntT, FloatT> BPTrait<IntT, FloatT> for BatchPairs<IntT, FloatT> {
     }
 }
 
-
 pub(super) type NodePairCollection<IntT, FloatT> = (
     OrdPairSICollection<IntT, FloatT>,
     PairMICollection<IntT, FloatT>,
 );
-
-
-

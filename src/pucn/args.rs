@@ -99,6 +99,7 @@ pub struct WorkflowArgs {
     pub samples_file: Option<String>,
     pub sub_net_files: Option<Vec<String>>,
     pub wflow_dir: Option<String>,
+    pub row_major_h5_file: Option<String>,
 
     #[serde(default = "default_gene_id_col")]
     pub gene_id_col: String, // = String::from_str("gene_ids"),

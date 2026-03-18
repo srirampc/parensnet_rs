@@ -63,10 +63,13 @@ impl<'a> MISIWorkFlow<'a> {
         let mut npairs_si = npairs_si.distribute(self.mpi_ifx)?;
         if log::log_enabled!(log::Level::Info) {
             s_timer.info_section("Node Pairs SI Distribution");
-            let n_si =
+            let n_sipx =
                 allreduce_sum(&(npairs_si.about.len()), self.mpi_ifx.comm());
+            let n_lmr =
+                allreduce_sum(&(npairs_si.lmr.len()), self.mpi_ifx.comm());
             cond_info!(
-                self.mpi_ifx.is_root(); "Distributed SI: {}", n_si
+                self.mpi_ifx.is_root();
+                "Distributed SI Pairs: {}, LMR: {}", n_sipx, n_lmr
             );
             s_timer.reset();
         }
@@ -109,7 +112,10 @@ impl<'a> MISIWorkFlow<'a> {
         cond_info!(self.mpi_ifx.is_root(); "Starting MISIWorkFlow::Run");
 
         let nodes = if Path::new(&self.args.hist_data_file).exists() {
-            NodeCollection::<i64, i32, f32>::from_h5(&self.args.hist_data_file)?
+            NodeCollection::<i64, i32, f32>::from_h5(
+                &self.args.hist_data_file,
+                self.args.nvars,
+            )?
         } else {
             HelperT::construct_nodes(self, self.mpi_ifx.rank)?
         };
@@ -268,8 +274,10 @@ impl<'a> MISIWorkFlow<'a> {
         assert!(!self.args.lmr_only);
         // 1. Flat loading of  all the nodes
         let mut s_timer = SectionTimer::from_comm(self.mpi_ifx.comm(), ",");
-        let nodes =
-            NodeCollection::<i64, i32, f32>::from_h5(&self.args.hist_data_file)?;
+        let nodes = NodeCollection::<i64, i32, f32>::from_h5(
+            &self.args.hist_data_file,
+            self.args.nvars,
+        )?;
         if log::log_enabled!(log::Level::Info) {
             s_timer.info_section("Load Nodes");
             //cond_info!(
@@ -310,8 +318,10 @@ impl<'a> MISIWorkFlow<'a> {
         cond_info!(self.mpi_ifx.is_root(); "Starting MISIWorkFlow::Run MISI Dist from Nodes");
         // 1. Flat loading of  all the nodes
         let mut s_timer = SectionTimer::from_comm(self.mpi_ifx.comm(), ",");
-        let nodes =
-            NodeCollection::<i64, i32, f32>::from_h5(&self.args.hist_data_file)?;
+        let nodes = NodeCollection::<i64, i32, f32>::from_h5(
+            &self.args.hist_data_file,
+            self.args.nvars,
+        )?;
 
         if log::log_enabled!(log::Level::Info) {
             s_timer.info_section("Load Nodes");

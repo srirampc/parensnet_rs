@@ -2,7 +2,9 @@ use anyhow::{Ok, Result};
 use hdf5::H5Type;
 use mpi::traits::{CommunicatorCollectives, Equivalence};
 use ndarray::{Array2, ArrayView1};
-use sope::{reduction::allreduce_sum, timer::SectionTimer};
+use sope::{
+    collective::gather_strings, reduction::allreduce_sum, timer::SectionTimer,
+};
 use std::{iter::zip, marker::PhantomData};
 
 use super::{
@@ -187,13 +189,15 @@ where
     ) -> Result<(Array2<FloatT>, Array2<FloatT>)> {
         let (rows, cols) = wf.wf_dist().pairs_2d().batch_range(bidx, rank);
         Ok((
-            wf.ann_data().read_range_data_around::<FloatT>(
+            wf.ann_data().par_rmajor_read_range_data_around::<FloatT>(
                 rows.clone(),
                 wf.wf_args().nroundup,
+                wf.comm_ifx(),
             )?,
-            wf.ann_data().read_range_data_around::<FloatT>(
+            wf.ann_data().par_rmajor_read_range_data_around::<FloatT>(
                 cols.clone(),
                 wf.wf_args().nroundup,
+                wf.comm_ifx(),
             )?,
         ))
     }
@@ -246,8 +250,24 @@ where
         bidx: usize,
         nodes: &NodeCollection<SizeT, IntT, FloatT>,
     ) -> Result<BatchPairs<IntT, FloatT>> {
+        let mut s_timer = SectionTimer::from_comm(wf.comm_ifx().comm(), ",");
         let (rows, cols) = wf.wf_dist().pairs_2d().batch_range(bidx, rank);
+        if log::log_enabled!(log::Level::Debug) {
+            s_timer.reset();
+        }
         let (row_data, col_data) = Self::load_batch_data(wf, rank, bidx)?;
+        if log::log_enabled!(log::Level::Debug) {
+            s_timer.info_section("Local Batch Loading ");
+            let v_str = gather_strings(
+                format!("{}:({:?},{:?})", rank, &rows, &cols).to_string(),
+                0,
+                wf.comm_ifx().comm(),
+            )?;
+            if let Some(v_str) = v_str {
+                log::debug!("Loaded Batch Data {} {:?}", bidx, v_str);
+            }
+            s_timer.reset();
+        }
         let mut batch_pairs =
             BatchPairs::<IntT, FloatT>::new(rows.clone(), cols.clone());
         for (i, rx) in rows.clone().enumerate() {
@@ -264,7 +284,19 @@ where
                 }
             }
         }
-
+        if log::log_enabled!(log::Level::Debug) {
+            s_timer.info_section("Local Batch Compute ");
+            // wf.mpi_ifx.comm().barrier();
+            let n_mi =
+                allreduce_sum(&(batch_pairs.2.len()), wf.comm_ifx().comm());
+            let n_si =
+                allreduce_sum(&(batch_pairs.0.len()), wf.comm_ifx().comm());
+            cond_debug!(
+                wf.comm_ifx().is_root();
+                "Built Batch {} MI : {}; SI: {} ",
+                bidx, n_mi, n_si,
+            );
+        }
         Ok(batch_pairs)
     }
 
@@ -351,10 +383,8 @@ where
             );
         }
 
-        let v_si = OrdPairSICollection::<IntT, FloatT>::from_vec(
-            nodes.hist_dim.as_slice().unwrap(),
-            &v_si,
-        );
+        let v_si =
+            OrdPairSICollection::<IntT, FloatT>::from_vec(nodes.len(), &v_si);
         let v_pmi = PairMICollection::<IntT, FloatT>::from_vec(&v_pmi);
         if log::log_enabled!(log::Level::Debug) {
             mpi_ifx.comm().barrier();

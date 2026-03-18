@@ -9,7 +9,9 @@ use sope::ensure_eq;
 use std::{collections::HashMap, iter::zip, ops::Range};
 use thiserror::Error;
 
-use crate::util::{around, read_csv_column};
+use crate::{
+    comm::CommIfx, cond_debug, h5::mpio, util::{around, read_csv_column}
+};
 
 #[derive(Error, Debug)]
 pub enum AnnDataError {
@@ -29,8 +31,8 @@ pub struct AnnData {
     pub npairs: usize,
     gene_ids: Vec<String>,
     gene_id_map: HashMap<String, usize>,
-    _path: String,
-    h5_fptr: hdf5::File,
+    path: String,
+    row_major_h5: Option<String>,
 }
 
 pub fn xds_dimensions(ad_fname: &str) -> Result<(usize, usize)> {
@@ -69,7 +71,11 @@ pub fn build_gene_index(
 }
 
 impl AnnData {
-    pub fn new(path: &str, gene_index_column: Option<String>) -> Result<Self> {
+    pub fn new(
+        path: &str,
+        gene_index_column: Option<String>,
+        row_major_h5: Option<String>,
+    ) -> Result<Self> {
         let h5_fptr = hdf5::File::open(path)?;
         let ds = h5_fptr.dataset("X")?;
         let dims = ds.shape();
@@ -86,11 +92,21 @@ impl AnnData {
             nobs,
             nvars,
             npairs,
-            _path: path.to_owned(),
+            path: path.to_owned(),
+            row_major_h5,
             gene_ids,
             gene_id_map: genes_id_map,
-            h5_fptr,
         })
+    }
+
+    fn open_r(&self) -> Result<hdf5::File> {
+        let h5fptr = hdf5::File::open(&self.path)?;
+        Ok(h5fptr)
+    }
+
+    fn open_mpio(&self, cx: &CommIfx) -> Result<hdf5::File> {
+        let h5fptr = mpio::open_file(cx, &self.path)?;
+        Ok(h5fptr)
     }
 
     pub fn gene_index_map(&self) -> &HashMap<String, usize> {
@@ -106,7 +122,7 @@ impl AnnData {
     }
 
     pub fn read_gene_ids(&self, col_name: &str) -> Result<Vec<String>> {
-        var_gene_names(&self.h5_fptr, col_name)
+        var_gene_names(&self.open_r()?, col_name)
     }
 
     pub fn get_gene_index(&self, gene_id: &str) -> Option<usize> {
@@ -120,11 +136,72 @@ impl AnnData {
             .collect()
     }
 
+    pub fn par_rmajor_range_data<T: H5Type + Clone>(
+        &self,
+        cbounds: Range<usize>,
+        cx: &CommIfx,
+    ) -> Result<Array2<T>> {
+        if let Some(h5path) = self.row_major_h5.as_ref() {
+            let h5fptr = mpio::open_file(cx, &h5path)?;
+
+            let ds = h5fptr.dataset("X")?;
+            let selection = ndarray::s![cbounds, ..self.nobs];
+            let rdata: Array2<T> =
+                ds.as_reader().indi_read_slice_2d(selection)?;
+            Ok(rdata.t().to_owned())
+        } else {
+            cond_debug!(cx.is_root(); "No row file; Switching to default read");
+            self.par_read_range_data(cbounds, cx)
+        }
+    }
+
+    pub fn par_rmajor_read_range_data_around<T: H5Type + Float + FromPrimitive>(
+        &self,
+        cbounds: Range<usize>,
+        n_decimals: usize,
+        cx: &CommIfx,
+    ) -> Result<Array2<T>> {
+        let rdata = self.par_rmajor_range_data(cbounds, cx)?;
+        Ok(if n_decimals > 0 {
+            around(rdata.view(), n_decimals)
+        } else {
+            rdata
+        })
+    }
+
+
+
+    pub fn par_read_range_data<T: H5Type>(
+        &self,
+        cbounds: Range<usize>,
+        cx: &CommIfx,
+    ) -> Result<Array2<T>> {
+        // TODO::
+        let ds = self.open_mpio(cx)?.dataset("X")?;
+        let selection = ndarray::s![..self.nobs, cbounds];
+        let rdata: Array2<T> = ds.as_reader().indi_read_slice_2d(selection)?;
+        Ok(rdata)
+    }
+
+    pub fn par_read_range_data_around<T: H5Type + Float + FromPrimitive>(
+        &self,
+        cbounds: Range<usize>,
+        n_decimals: usize,
+        cx: &CommIfx,
+    ) -> Result<Array2<T>> {
+        let rdata = self.par_read_range_data(cbounds, cx)?;
+        Ok(if n_decimals > 0 {
+            around(rdata.view(), n_decimals)
+        } else {
+            rdata
+        })
+    }
+
     pub fn read_range_data<T: H5Type>(
         &self,
         cbounds: Range<usize>,
     ) -> Result<Array2<T>> {
-        let ds = self.h5_fptr.dataset("X")?;
+        let ds = self.open_r()?.dataset("X")?;
         let rbounds = ..self.nobs;
         let rdata: Array2<T> = ds.read_slice_2d(ndarray::s![rbounds, cbounds])?;
         Ok(rdata)
@@ -149,7 +226,7 @@ impl AnnData {
     ) -> Result<Array2<T>> {
         // TODO:: How to do this faster?
         let mut smat = Array2::<T>::zeros([self.nobs, indices.len()]);
-        let ds = self.h5_fptr.dataset("X")?;
+        let ds = self.open_r()?.dataset("X")?;
         for (i, col_index) in indices.iter().enumerate() {
             let scolumn = ndarray::s![..self.nobs, *col_index];
             let rd_col: Array1<T> = ds.read_slice(scolumn)?;
@@ -179,7 +256,7 @@ impl AnnData {
         column_index: usize,
     ) -> Result<Array1<T>> {
         // mat_col: NDFloatArray = hfx["X"][:, cindex]
-        let ds = self.h5_fptr.dataset("X")?;
+        let ds = self.open_r()?.dataset("X")?;
         let rbounds = ..self.nobs;
         Ok(ds.read_slice(ndarray::s![rbounds, column_index])?)
     }
@@ -190,7 +267,7 @@ impl AnnData {
         n_decimals: usize,
     ) -> Result<Array1<T>> {
         // mat_col: NDFloatArray = hfx["X"][:, cindex]
-        let ds = self.h5_fptr.dataset("X")?;
+        let ds = self.open_r()?.dataset("X")?;
         let rbounds = ..self.nobs;
         let cdata = ds.read_slice(ndarray::s![rbounds, column_index])?;
         Ok(if n_decimals > 0 {

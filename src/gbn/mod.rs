@@ -60,7 +60,7 @@ fn mpi_cv_gbn_for(
 
 pub fn run_cross_fold_gbm(args: &GBGRNArgs, mcx: &CommIfx) -> Result<CVStats> {
     cond_info!(mcx.is_root(); "Data H5AD : {}", args.h5ad_file);
-    let adata = AnnData::new(&args.h5ad_file, Some(args.gene_id_col.clone()))?;
+    let adata = AnnData::new(&args.h5ad_file, Some(args.gene_id_col.clone()), None)?;
     cond_info!(mcx.is_root(); "TF File  : {}", args.tf_csv_file);
     let tf_set =
         GeneSetAD::new(&adata, &args.tf_csv_file, None, Some(args.nroundup))?;
@@ -70,7 +70,7 @@ pub fn run_cross_fold_gbm(args: &GBGRNArgs, mcx: &CommIfx) -> Result<CVStats> {
 
 pub fn infer_gb_network(args: &GBGRNArgs, mcx: &CommIfx) -> Result<()> {
     cond_info!(mcx.is_root(); "Data H5AD : {}", args.h5ad_file);
-    let adata = AnnData::new(&args.h5ad_file, Some(args.gene_id_col.clone()))?;
+    let adata = AnnData::new(&args.h5ad_file, Some(args.gene_id_col.clone()), None)?;
     cond_info!(mcx.is_root(); "TF File  : {}", args.tf_csv_file);
     let tf_set =
         GeneSetAD::new(&adata, &args.tf_csv_file, None, Some(args.nroundup))?;
