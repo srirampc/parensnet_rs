@@ -25,13 +25,17 @@ fn map_data2bin<T: Float + TotalOrder>(bin_edges: &[T], qry_dx: &T) -> usize {
 
 pub fn histogram_1d<T, S>(data: ArrayView1<T>, edges: &[T]) -> Array1<S>
 where
-    T: Float + TotalOrder,
+    T: Float + TotalOrder + Debug,
     S: AddFromZero + Clone,
 {
     let mut hist = Array1::<S>::from_elem(edges.len() - 1, S::zero());
     //let ed_slice = edges.as_slice().unwrap();
     for dx in data {
-        hist[map_data2bin(edges, dx)] += S::one();
+        let mut idx =  map_data2bin(edges, dx);
+        if idx >= hist.len() {
+            idx = hist.len() - 1;
+        }
+        hist[idx] += S::one();
     }
     hist
 }
@@ -46,13 +50,13 @@ where
     T: Float + TotalOrder,
     S: AddFromZero + Clone,
 {
-    let mut hist = Array2::<S>::from_elem(
-        (x_bin_edges.len() - 1, y_bin_edges.len() - 1),
-        S::zero(),
-    );
+    let x_dim = x_bin_edges.len() - 1;
+    let y_dim = y_bin_edges.len() - 1;
+    let mut hist = Array2::<S>::from_elem((x_dim, y_dim), S::zero());
     for (dx, dy) in std::iter::zip(x_data.iter(), y_data.iter()) {
-        hist[[map_data2bin(x_bin_edges, dx), map_data2bin(y_bin_edges, dy)]] +=
-            S::one();
+        let x_idx = map_data2bin(x_bin_edges, dx).min(x_dim - 1);
+        let y_idx = map_data2bin(y_bin_edges, dy).min(y_dim - 1);
+        hist[[x_idx, y_idx]] += S::one();
     }
     hist
 }
@@ -64,7 +68,7 @@ pub fn joint_histogram<T>(
     y_bin_edges: &[T],
 ) -> (Array2<T>, Array1<T>, Array1<T>)
 where
-    T: Float + TotalOrder + AddFromZero + Clone,
+    T: Float + TotalOrder + AddFromZero + Clone + Debug,
 {
     (
         histogram_2d(x_data, x_bin_edges, y_data, y_bin_edges),
