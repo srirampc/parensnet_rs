@@ -33,7 +33,7 @@ def build_data_frame(
     meta_props,
     rows,
     col_names=["Max", "Min", "Avg", "Phase"],
-    meta_names=["Run", "Dataset", "NCELLS", "NGENES", "NP", "N"]
+    meta_names=["Run", "Dataset", "NCELLS", "NGENES", "NP", "N"],
 ):
     nrows = len(rows)
     ncols = len(rows[0])
@@ -58,9 +58,9 @@ def log_data_frame(lfx: str):
     return ldf
 
 
-def main(log_dir: str, out_csv: str):
+def main(log_dir: str, pattern: str, out_csv: str):
     logging.basicConfig(level=logging.INFO)
-    log_files = glob.glob(f"{log_dir}/*.log")
+    log_files = glob.glob(f"{log_dir}/{pattern}")
     nfiles = len(log_files)
     df_list = []
     for ix, lfx in enumerate(log_files):
@@ -74,4 +74,5 @@ def main(log_dir: str, out_csv: str):
 
 
 if __name__ == "__main__":
-    main("slurm/log/", "slurm/log_times.csv")
+    # main("slurm/log/", "*.log", "slurm/log_times.csv")
+    main("slurm/log/cluster_pucn/", "*.log", "slurm/cluster_pucn_log_times.csv")
