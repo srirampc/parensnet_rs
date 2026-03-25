@@ -74,5 +74,5 @@ def main(log_dir: str, pattern: str, out_csv: str):
 
 
 if __name__ == "__main__":
-    # main("slurm/log/", "*.log", "slurm/log_times.csv")
-    main("slurm/log/cluster_pucn/", "*.log", "slurm/cluster_pucn_log_times.csv")
+    main("slurm/log/", "*100Kg*.log", "slurm/log_times_100K.csv")
+    # main("slurm/log/cluster_pucn/", "*.log", "slurm/cluster_pucn_log_times.csv")
