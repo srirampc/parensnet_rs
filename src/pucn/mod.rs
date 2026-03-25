@@ -21,6 +21,7 @@ use mpi::traits::{Communicator, Root};
 use ndarray::{Array1, Array2, Axis};
 use ndarray_rand::{RandomExt, SamplingStrategy};
 use num::{FromPrimitive, Integer, Zero};
+use sope::timer::CumulativeTimer;
 use std::ops::{AddAssign, Range};
 use thiserror::Error;
 
@@ -116,12 +117,20 @@ pub(super) trait MISIWorkFlowTrait<'a> {
     fn wf_dist(&self) -> &'a WorkDistributor;
     fn wf_args(&self) -> &'a WorkflowArgs;
     fn ann_data(&self) -> &'a AnnData;
+    fn io_timer(&self) -> &CumulativeTimer<'a>;
+    fn detailed_log(&self) -> bool {
+        false
+    }
 }
 
 pub(super) trait PUCWorkFlowTrait<'a> {
     fn comm_ifx(&self) -> &'a CommIfx;
     fn wf_dist(&self) -> &'a WorkDistributor;
     fn wf_args(&self) -> &'a WorkflowArgs;
+
+    fn detailed_log(&self) -> bool {
+        false
+    }
 }
 
 fn pair_indices<T>(st_ranges: RangePair<usize>) -> Array2<T>
@@ -250,6 +259,7 @@ pub fn execute_workflow(mpi_ifx: &CommIfx, args: &WorkflowArgs) -> Result<()> {
                     adata: &adata,
                     wdistr: &wdistr,
                     mpi_ifx,
+                    io_timer: CumulativeTimer::from_comm(mpi_ifx.comm(), ",")
                 };
                 match rmode {
                     RunMode::MISI => rmisi.run()?,

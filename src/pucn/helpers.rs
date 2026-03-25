@@ -41,12 +41,15 @@ where
         wf: &dyn MISIWorkFlowTrait,
         rank: i32,
     ) -> Result<NodeCollection<SizeT, IntT, FloatT>> {
-        let mut s_timer = SectionTimer::from_comm(wf.comm_ifx().comm(), ",");
+        let s_timer = SectionTimer::from_comm(wf.comm_ifx().comm(), ",");
         let columns = wf.wf_dist().var_dist[rank as usize].clone();
-        let rdata = wf.ann_data().read_range_data_around::<FloatT>(
+        wf.io_timer().reset();
+        let rdata = wf.ann_data().par_read_range_data_around::<FloatT>(
             columns.clone(),
             wf.wf_args().nroundup,
+            wf.comm_ifx(),
         )?;
+        wf.io_timer().add_elapsed();
         let var_data: Vec<Node<IntT, FloatT>> = columns
             .into_iter()
             .enumerate()
@@ -72,7 +75,7 @@ where
         if log::log_enabled!(log::Level::Info) {
             s_timer.info_section("Nodes Collection");
             cond_info!(
-                wf.comm_ifx().is_root(); "Collected nodes: {} ", nodes.len()
+                wf.comm_ifx().is_root(); "Collected nodes: {} at root", nodes.len()
             );
             s_timer.reset();
         }
@@ -188,7 +191,8 @@ where
         bidx: usize,
     ) -> Result<(Array2<FloatT>, Array2<FloatT>)> {
         let (rows, cols) = wf.wf_dist().pairs_2d().batch_range(bidx, rank);
-        Ok((
+        wf.io_timer().reset();
+        let block_data = (
             wf.ann_data().par_rmajor_read_range_data_around::<FloatT>(
                 rows.clone(),
                 wf.wf_args().nroundup,
@@ -199,7 +203,9 @@ where
                 wf.wf_args().nroundup,
                 wf.comm_ifx(),
             )?,
-        ))
+        );
+        wf.io_timer().add_elapsed();
+        Ok(block_data)
     }
 
     fn construct_hist_node_pairs_for_batch(
@@ -209,6 +215,12 @@ where
         nodes: &NodeCollection<SizeT, IntT, FloatT>,
     ) -> Result<Vec<PairMI<IntT, FloatT>>> {
         let (row_data, col_data) = Self::load_batch_data(wf, rank, bidx)?;
+        if log::log_enabled!(log::Level::Debug) {
+            let n_hist = allreduce_sum(&(row_data.len()), wf.comm_ifx().comm());
+            cond_debug!(
+                wf.comm_ifx().is_root(); "Loaded Batch {} with : {} ", bidx, n_hist
+            );
+        }
         let (rows, cols) = wf.wf_dist().pairs_2d().batch_range(bidx, rank);
         let mut v_hist: Vec<PairMI<IntT, FloatT>> = Vec::new();
         for (i, rx) in rows.clone().enumerate() {
@@ -250,21 +262,23 @@ where
         bidx: usize,
         nodes: &NodeCollection<SizeT, IntT, FloatT>,
     ) -> Result<BatchPairs<IntT, FloatT>> {
-        let mut s_timer = SectionTimer::from_comm(wf.comm_ifx().comm(), ",");
-        let (rows, cols) = wf.wf_dist().pairs_2d().batch_range(bidx, rank);
+        let s_timer = SectionTimer::from_comm(wf.comm_ifx().comm(), ",");
         if log::log_enabled!(log::Level::Debug) {
             s_timer.reset();
         }
+        let (rows, cols) = wf.wf_dist().pairs_2d().batch_range(bidx, rank);
         let (row_data, col_data) = Self::load_batch_data(wf, rank, bidx)?;
         if log::log_enabled!(log::Level::Debug) {
             s_timer.info_section("Local Batch Loading ");
-            let v_str = gather_strings(
-                format!("{}:({:?},{:?})", rank, &rows, &cols).to_string(),
-                0,
-                wf.comm_ifx().comm(),
-            )?;
-            if let Some(v_str) = v_str {
-                log::debug!("Loaded Batch Data {} {:?}", bidx, v_str);
+            if wf.detailed_log() {
+                let v_str = gather_strings(
+                    format!("{}:({:?},{:?})", rank, &rows, &cols).to_string(),
+                    0,
+                    wf.comm_ifx().comm(),
+                )?;
+                if let Some(v_str) = v_str {
+                    log::debug!("Loaded Batch Data {} {:?}", bidx, v_str);
+                }
             }
             s_timer.reset();
         }
@@ -316,10 +330,10 @@ where
         // flatten
         let mut v_hist: Vec<_> = v_hist.into_iter().flatten().collect();
         v_hist.sort_by_key(|x| x.index);
-        if log::log_enabled!(log::Level::Debug) {
+        if log::log_enabled!(log::Level::Info) {
             wf.comm_ifx().comm().barrier();
             let n_hist = allreduce_sum(&(v_hist.len()), wf.comm_ifx().comm());
-            cond_debug!(
+            cond_info!(
                 wf.comm_ifx().is_root(); "Built Hist : {} ", n_hist
             );
         }

@@ -250,7 +250,7 @@ impl<'a> LMRPUCWorkflow<'a> {
     pub fn run(&self) -> Result<()> {
         type HelperT = LMRWorkFlowHelper<i64, i32, f32>;
         type PT = PUCResults<i32, i64>;
-        let mut s_timer = SectionTimer::from_comm(self.mpi_ifx.comm(), ",");
+        let s_timer = SectionTimer::from_comm(self.mpi_ifx.comm(), ",");
 
         let nbatches = self.wdistr.pairs_2d().num_batches();
         let rsamples = match collect_samples::<i32>(

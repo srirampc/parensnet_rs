@@ -4,7 +4,7 @@ use anyhow::{Ok, Result};
 use mpi::traits::CommunicatorCollectives;
 use sope::{
     reduction::{all_of, allreduce_sum},
-    timer::SectionTimer,
+    timer::{SectionTimer, CumulativeTimer},
 };
 
 use super::{
@@ -19,6 +19,7 @@ pub struct MISIWorkFlow<'a> {
     pub wdistr: &'a WorkDistributor,
     pub args: &'a WorkflowArgs,
     pub adata: &'a AnnData,
+    pub io_timer: CumulativeTimer<'a>,
 }
 
 impl<'a> MISIWorkFlowTrait<'a> for MISIWorkFlow<'a> {
@@ -37,6 +38,14 @@ impl<'a> MISIWorkFlowTrait<'a> for MISIWorkFlow<'a> {
     fn ann_data(&self) -> &'a AnnData {
         self.adata
     }
+
+    fn io_timer(&self) -> &CumulativeTimer<'a> {
+        &self.io_timer
+    }
+
+    fn detailed_log(&self) -> bool {
+        std::env::var("PARENTSNET_DETAIL_LOG").is_ok()
+    }
 }
 
 impl<'a> MISIWorkFlow<'a> {
@@ -47,7 +56,7 @@ impl<'a> MISIWorkFlow<'a> {
         npairs_mi: PairMICollection<i32, f32>,
     ) -> Result<()> {
         type HelperT = MISIWorkFlowHelper<i64, i32, f32>;
-        let mut s_timer = SectionTimer::from_comm(self.mpi_ifx.comm(), ",");
+        let s_timer = SectionTimer::from_comm(self.mpi_ifx.comm(), ",");
         let npairs_mi = npairs_mi
             .distribute(self.mpi_ifx, nodes.hist_dim.as_slice().unwrap())?;
         if log::log_enabled!(log::Level::Info) {
@@ -108,7 +117,7 @@ impl<'a> MISIWorkFlow<'a> {
 
     pub fn run(&self) -> Result<()> {
         type HelperT = MISIWorkFlowHelper<i64, i32, f32>;
-        let mut s_timer = SectionTimer::from_comm(self.mpi_ifx.comm(), ",");
+        let s_timer = SectionTimer::from_comm(self.mpi_ifx.comm(), ",");
         cond_info!(self.mpi_ifx.is_root(); "Starting MISIWorkFlow::Run");
 
         let nodes = if Path::new(&self.args.hist_data_file).exists() {
@@ -145,12 +154,14 @@ impl<'a> MISIWorkFlow<'a> {
             );
             s_timer.reset();
         }
-        self.save_distribute(nodes, npairs_si, npairs_mi)
+        self.save_distribute(nodes, npairs_si, npairs_mi)?;
+        self.io_timer.info_region("Total IO");
+        Ok(())
     }
 
     pub fn run_hist_nodes(&self) -> Result<()> {
         type HelperT = MISIWorkFlowHelper<i64, i32, f32>;
-        let mut s_timer = SectionTimer::from_comm(self.mpi_ifx.comm(), ",");
+        let s_timer = SectionTimer::from_comm(self.mpi_ifx.comm(), ",");
         cond_info!(self.mpi_ifx.is_root(); "Starting MISIWorkFlow::Run");
 
         let nodes = HelperT::construct_nodes(self, self.mpi_ifx.rank)?;
@@ -170,12 +181,13 @@ impl<'a> MISIWorkFlow<'a> {
             cond_info!(self.mpi_ifx.is_root(); "Completed Writing Nodes");
             s_timer.reset();
         }
+        self.io_timer.info_region("Total IO");
         Ok(())
     }
 
     pub fn run_hist(&self) -> Result<()> {
         type HelperT = MISIWorkFlowHelper<i64, i32, f32>;
-        let mut s_timer = SectionTimer::from_comm(self.mpi_ifx.comm(), ",");
+        let s_timer = SectionTimer::from_comm(self.mpi_ifx.comm(), ",");
         cond_info!(self.mpi_ifx.is_root(); "Starting MISIWorkFlow::Run");
 
         let nodes = HelperT::construct_nodes(self, self.mpi_ifx.rank)?;
@@ -236,6 +248,7 @@ impl<'a> MISIWorkFlow<'a> {
             s_timer.info_section("Write Node Pairs");
             cond_info!(self.mpi_ifx.is_root(); "Finished MISIWorkFlow::Run");
         }
+        self.io_timer.info_region("Total IO");
         Ok(())
     }
 
@@ -245,7 +258,7 @@ impl<'a> MISIWorkFlow<'a> {
         hist_pairs: PairMICollection<i32, f32>,
     ) -> Result<()> {
         type HelperT = MISIWorkFlowHelper<i64, i32, f32>;
-        let mut s_timer = SectionTimer::from_comm(self.mpi_ifx.comm(), ",");
+        let s_timer = SectionTimer::from_comm(self.mpi_ifx.comm(), ",");
         if let Some((npairs_si, npairs_mi)) =
             HelperT::construct_lmr_node_pairs(self, &nodes, hist_pairs)?
         {
@@ -273,7 +286,7 @@ impl<'a> MISIWorkFlow<'a> {
         cond_info!(self.mpi_ifx.is_root(); "Starting MISIWorkFlow::Run MISI Dist");
         assert!(!self.args.lmr_only);
         // 1. Flat loading of  all the nodes
-        let mut s_timer = SectionTimer::from_comm(self.mpi_ifx.comm(), ",");
+        let s_timer = SectionTimer::from_comm(self.mpi_ifx.comm(), ",");
         let nodes = NodeCollection::<i64, i32, f32>::from_h5(
             &self.args.hist_data_file,
             self.args.nvars,
@@ -310,6 +323,7 @@ impl<'a> MISIWorkFlow<'a> {
         }
         Self::run_misi_dist_from_hist(self, nodes, hist_pairs)?;
         cond_info!(self.mpi_ifx.is_root(); "Completed MISIWorkFlow::Run MISI Dist");
+        self.io_timer.info_region("Total IO");
         Ok(())
     }
 
@@ -317,7 +331,7 @@ impl<'a> MISIWorkFlow<'a> {
         type HelperT = MISIWorkFlowHelper<i64, i32, f32>;
         cond_info!(self.mpi_ifx.is_root(); "Starting MISIWorkFlow::Run MISI Dist from Nodes");
         // 1. Flat loading of  all the nodes
-        let mut s_timer = SectionTimer::from_comm(self.mpi_ifx.comm(), ",");
+        let s_timer = SectionTimer::from_comm(self.mpi_ifx.comm(), ",");
         let nodes = NodeCollection::<i64, i32, f32>::from_h5(
             &self.args.hist_data_file,
             self.args.nvars,
@@ -357,6 +371,7 @@ impl<'a> MISIWorkFlow<'a> {
         }
         Self::run_misi_dist_from_hist(self, nodes, hist_pairs)?;
         cond_info!(self.mpi_ifx.is_root(); "Complete MISIWorkFlow::Run MISI Dist from Nodes");
+        self.io_timer.info_region("Total IO");
         Ok(())
     }
 }

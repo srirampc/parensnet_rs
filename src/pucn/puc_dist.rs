@@ -659,7 +659,7 @@ where
 impl<'a> PUCDistWorkflow<'a> {
     pub fn run(&self) -> Result<()> {
         type HelperT = PUCDistWorkFlowHelper<i64, i32, f32>;
-        let mut s_timer = SectionTimer::from_comm(self.mpi_ifx.comm(), ",");
+        let s_timer = SectionTimer::from_comm(self.mpi_ifx.comm(), ",");
         let vu_dist = HelperT::var_uniform_dist(self)?;
         s_timer.info_section("Dist PUC::Build");
         gather_debug!(self.mpi_ifx.comm(); "LMR Distr. {}", vu_dist);

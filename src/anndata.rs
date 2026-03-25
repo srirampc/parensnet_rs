@@ -10,7 +10,10 @@ use std::{collections::HashMap, iter::zip, ops::Range};
 use thiserror::Error;
 
 use crate::{
-    comm::CommIfx, cond_debug, h5::mpio, util::{around, read_csv_column}
+    comm::CommIfx,
+    cond_debug,
+    h5::mpio,
+    util::{around, read_csv_column},
 };
 
 #[derive(Error, Debug)]
@@ -142,8 +145,7 @@ impl AnnData {
         cx: &CommIfx,
     ) -> Result<Array2<T>> {
         if let Some(h5path) = self.row_major_h5.as_ref() {
-            let h5fptr = mpio::open_file(cx, &h5path)?;
-
+            let h5fptr = mpio::open_file(cx, h5path)?;
             let ds = h5fptr.dataset("X")?;
             let selection = ndarray::s![cbounds, ..self.nobs];
             let rdata: Array2<T> =
@@ -155,7 +157,9 @@ impl AnnData {
         }
     }
 
-    pub fn par_rmajor_read_range_data_around<T: H5Type + Float + FromPrimitive>(
+    pub fn par_rmajor_read_range_data_around<
+        T: H5Type + Float + FromPrimitive,
+    >(
         &self,
         cbounds: Range<usize>,
         n_decimals: usize,
@@ -168,8 +172,6 @@ impl AnnData {
             rdata
         })
     }
-
-
 
     pub fn par_read_range_data<T: H5Type>(
         &self,
@@ -205,6 +207,22 @@ impl AnnData {
         let rbounds = ..self.nobs;
         let rdata: Array2<T> = ds.read_slice_2d(ndarray::s![rbounds, cbounds])?;
         Ok(rdata)
+    }
+
+    pub fn read_rmajor_range_data<T: H5Type>(
+        &self,
+        cbounds: Range<usize>,
+    ) -> Result<Array2<T>> {
+        if let Some(h5path) = self.row_major_h5.as_ref() {
+            let h5fptr = hdf5::File::open(h5path)?;
+            let ds = h5fptr.dataset("X")?;
+            let rbounds = ..self.nobs;
+            let rdata: Array2<T> =
+                ds.read_slice_2d(ndarray::s![rbounds, cbounds])?;
+            Ok(rdata)
+        } else {
+            self.read_range_data(cbounds)
+        }
     }
 
     pub fn read_range_data_around<T: H5Type + Float + FromPrimitive>(
