@@ -1,3 +1,4 @@
+import argparse
 import glob
 import logging
 import pathlib
@@ -58,9 +59,8 @@ def log_data_frame(lfx: str):
     return ldf
 
 
-def main(log_dir: str, pattern: str, out_csv: str):
+def main(log_files: list[str], out_csv: str):
     logging.basicConfig(level=logging.INFO)
-    log_files = glob.glob(f"{log_dir}/{pattern}")
     nfiles = len(log_files)
     df_list = []
     for ix, lfx in enumerate(log_files):
@@ -73,6 +73,28 @@ def main(log_dir: str, pattern: str, out_csv: str):
     full_df.write_csv(out_csv)
 
 
+def main_pattern(log_dir: str, pattern: str, out_csv: str):
+    logging.basicConfig(level=logging.INFO)
+    log_files = glob.glob(f"{log_dir}/{pattern}")
+    main(log_files, out_csv)
+
+
 if __name__ == "__main__":
-    main("slurm/log/", "*100Kg*.log", "slurm/log_times_100K.csv")
-    # main("slurm/log/cluster_pucn/", "*.log", "slurm/cluster_pucn_log_times.csv")
+    parser = argparse.ArgumentParser(
+        description="Process files from a source directory"
+    )
+    parser.add_argument("-o", "--output", type=str,
+                        required=True, help="Output CSV")
+    parser.add_argument(
+        "files",
+        type=str,
+        nargs="+",
+        help="List of log files to read from",
+    )
+
+    args = parser.parse_args()
+    # main_pattern("slurm/log/", "*.log", "slurm/log_times.csv")
+    # main_pattern("slurm/log/cluster_pucn/", "*.log", "slurm/cluster_pucn_log_times.csv")
+    # main_pattern("log/", "*.log", "log/pidc_log_times.csv")
+    # main_pattern("./log/", "*pbmcl*.log", "slurm/cluser_pucn_log_times.csv")
+    main(args.files, args.output)
