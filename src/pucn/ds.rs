@@ -258,6 +258,7 @@ where
         h5f: &str,
         hist_dim: &[IntT],
     ) -> Result<Self> {
+        assert!(args.npairs > 0);
         let mi_dist = InterleavedDist::new(args.npairs, cx.size, cx.rank);
         let mi = mpio::block_read1d(cx, h5f, "data/mi", Some(&mi_dist))?;
         let index = mi_dist.range().collect();

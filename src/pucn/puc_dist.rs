@@ -507,6 +507,7 @@ where
         dist: &'a DistLMR<FloatT>,
     ) -> Result<Self> {
         assert!(dist.mode == DistMode::VarUniform);
+        let s_timer = SectionTimer::from_comm(cx.comm(), ",");
         let var_ints: Vec<IntT> = (0..dist.nvars())
             .map(|x| IntT::from_usize(x).unwrap())
             .collect();
@@ -553,6 +554,8 @@ where
                 nctx += 1;
             }
         }
+        s_timer.info_section("Dist PUC::LMR Minsum:: LMR Build");
+        s_timer.reset();
         gather_debug!(cx.comm(); "SX {} {}", nctx, size);
         debug_assert!(nctx == size);
         debug_assert!(itertools::all(
@@ -573,6 +576,7 @@ where
             zip(pair_x.iter(), pair_y.iter()),
             |(x, y)| *x < *y
         ));
+        s_timer.info_section("Dist PUC::LMR Minsum:: LMR All2All");
 
         Ok(Self {
             dist,
