@@ -7,6 +7,7 @@ use sope::{
     collective::{all2all_vec, all2allv_vec, allgather_one, allgatherv_full_vec},
     partition::{ArbitDist, Dist, InterleavedDist},
     reduction::allreduce_sum,
+    timer::SectionTimer,
     util::exc_prefix_sum,
 };
 use std::{collections::HashMap, fmt::Debug, iter::zip, ops::Range};
@@ -330,6 +331,7 @@ where
     }
 
     pub fn distribute(&self, mcx: &CommIfx, hist_dim: &[IntT]) -> Result<Self> {
+        let s_timer = SectionTimer::from_comm(mcx.comm(), ",");
         let npairs: usize = allreduce_sum(&(self.index.len()), mcx.comm());
         let np = mcx.size as usize;
         let (snd_pairs, snd_tabs) = self
@@ -347,6 +349,8 @@ where
                 sv.1[p_own] += rdim;
                 sv
             });
+        s_timer.info_section("PairMICollection::distribute::Preparation");
+        s_timer.reset();
         let rcv_pairs = all2all_vec(&snd_pairs, mcx.comm())?;
         let rcv_tabs = all2all_vec(&snd_tabs, mcx.comm())?;
 
@@ -379,6 +383,7 @@ where
         } else {
             None
         };
+        s_timer.info_section("PairMICollection::distribute::All2All");
 
         Ok(Self {
             index,
@@ -455,6 +460,7 @@ where
     }
 
     pub fn distribute(&self, mcx: &CommIfx) -> Result<Self> {
+        let s_timer = SectionTimer::from_comm(mcx.comm(), ",");
         let np = mcx.size as usize;
         let (snd_pairs, snd_si) = self
             .sizes
@@ -473,6 +479,8 @@ where
                     sv
                 },
             );
+        s_timer.info_section("OrdPairSICollection::distribute::Preparation");
+        s_timer.reset();
         let rcv_pairs = all2all_vec(&snd_pairs, mcx.comm())?;
         let rcv_si = all2all_vec(&snd_si, mcx.comm())?;
 
@@ -497,6 +505,7 @@ where
             &rcv_si,
             mcx.comm(),
         )?;
+        s_timer.info_section("OrdPairSICollection::distribute::All2All");
 
         Ok(Self {
             nvars: self.nvars,

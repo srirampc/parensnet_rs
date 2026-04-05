@@ -100,7 +100,7 @@ use parensnet_rs::{
 
 fn run_gb_grn(ad_fname: &str, tf_csv: &str, out_file: &str) -> Result<()> {
     let ndecimals: usize = 3;
-    let adata = AnnData::new(ad_fname, Some("_index".to_string()))?;
+    let adata = AnnData::new(ad_fname, Some("_index".to_string()), None)?;
     let tf_set = GeneSetAD::new(&adata, tf_csv, None, Some(ndecimals))?;
     let config = CVConfig {
         n_sample_genes: 10,
