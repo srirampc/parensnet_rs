@@ -68,7 +68,6 @@ RSC12K_CAT_SIZES = [
     997,
 ]
 
-
 RSC20K_CAT = [
     "0",
     "1",
@@ -106,12 +105,12 @@ RSC20K_CAT = [
 
 
 CFG_FORMAT_5K = """
-h5ad_file: "./data/pbmc_scrna/0020K/adata.20K.5K.C{c}.h5ad"
-row_major_h5_file: "/data/pbmc_scrna/0020K/adata.20K.5K.C{c}.rmajor.h5"
-misi_data_file: "./out/pbmc20k.5K/adata.20k.5K.C{c}.misi.h5"
-hist_data_file: "./out/pbmc20k.5K/adata.20k.5K.C{c}.hist.h5"
-puc_file: "./out/pbmc20k.5K/adata.20k.5K.C{c}.lmr_puc.h5"
-pidc_file: "./out/pbmc20k.5K/adata.20k.5K.C{c}.lmr_pidc.h5"
+h5ad_file: "./data/pbmc_scrna/0020K/adata_leiden.20K.5K.C{c}.h5ad"
+row_major_h5_file: "./data/pbmc_scrna/0020K/adata_leiden.20K.5K.C{c}.rmajor.h5"
+misi_data_file: "./out/pbmc20K.5K/adata_leiden.20K.5K.C{c}.misi.h5"
+hist_data_file: "./out/pbmc20K.5K/adata_leiden.20K.5K.C{c}.hist.h5"
+puc_file: "./out/pbmc20K.5K/adata_leiden.20K.5K.C{c}.lmr_puc.h5"
+pidc_file: "./out/pbmc20K.5K/adata_leiden.20K.5K.C{c}.lmr_pidc.h5"
 #
 nrounds: 0
 nsamples: 0
@@ -127,12 +126,12 @@ save_node_pairs: True
 """
 
 COMPLETE_CFG_FORMAT_5K = """
-h5ad_file: "./data/pbmc_scrna/0020K/adata.20K.5K.C{c}.h5ad"
-row_major_h5_file: "/data/pbmc_scrna/0020K/adata.20K.5K.C{c}.rmajor.h5"
-misi_data_file: "./out/pbmc20k.5K/adata.20k.5K.C{c}.misi.h5"
-hist_data_file: "./out/pbmc20k.5K/adata.20k.5K.C{c}.hist.h5"
-puc_file: "./out/pbmc20k.5K/adata.20k.5K.C{c}.lmr_puc.h5"
-pidc_file: "./out/pbmc20k.5K/adata.20k.5K.C{c}.lmr_pidc.h5"
+h5ad_file: "./data/pbmc_scrna/0020K/adata_leiden.20K.5K.C{c}.h5ad"
+row_major_h5_file: "./data/pbmc_scrna/0020K/adata_leiden.20K.5K.C{c}.rmajor.h5"
+misi_data_file: "./out/pbmc20K.5K/adata_leiden.20K.5K.C{c}.misi.h5"
+hist_data_file: "./out/pbmc20K.5K/adata_leiden.20K.5K.C{c}.hist.h5"
+puc_file: "./out/pbmc20K.5K/adata_leiden.20K.5K.C{c}.lmr_puc.h5"
+pidc_file: "./out/pbmc20K.5K/adata_leiden.20K.5K.C{c}.lmr_pidc.h5"
 #
 nrounds: 0
 nsamples: 0
@@ -243,6 +242,29 @@ def gen5k():
                 fx.write(cfg_contents)
 
 
+def gen5k_complete():
+    for cx in PBMC5K_CAT:
+        cfg_contents = COMPLETE_CFG_FORMAT_5K.format(c=cx)
+        fname = f"./config/cluster_pucn/dcomplete_pbmc_c20Kg5Kl{cx}.yml"
+        with open(fname, "w") as fx:
+            fx.write(cfg_contents)
+
+
+def gen5k_cmd(n=64):
+    cmd_list = []
+    for cx in PBMC5K_CAT:
+        fname = f"./config/cluster_pucn/dcomplete_pbmc_c20Kg5Kl{cx}.yml"
+        logfx = f"./log/dmisi_pbmcl{cx}_c20Kg5K_p64n1.log"
+        cmd = f"./slurm/run_puc.sh -c {fname} -p {n} 2>&1 | tee {logfx}"
+        cmd_list.append(cmd)
+    #
+    with open("./slurm/scripts/run_complete_clusters5K.sh", "w") as fx:
+        fx.write("#!/bin/sh\n")
+        for cmd in cmd_list:
+            fx.write(f"echo \"{cmd}\" \n")
+            fx.write(f"{cmd} \n")
+
+
 def gen20k_stages():
     STAGES_20K = ["hist_nodes", "hist2misi_dist", "puc_lmr_dist"]
     PREFIXES_20K = ["dnodes", "dnodes2misi", "dpuc"]
@@ -254,18 +276,11 @@ def gen20k_stages():
                 fx.write(cfg_contents)
 
 
-def gen20k_complete():
-    for cx in RSC20K_CAT:
-        cfg_contents = COMPLETE_CFG_FORMAT_20K.format(c=cx)
-        fname = f"./config/cluster_pucn/dcomplete_pbmc_c100Kg20Kl{cx}.yml"
-        with open(fname, "w") as fx:
-            fx.write(cfg_contents)
-
-
 def gen20k_complete_scripts():
     for cx in RSC20K_CAT:
         script_contents = SCRIPT_FORMAT_20K.format(c=cx)
-        fname = f"./slurm/scripts/cluster_pucn/dcomplete_pbmc{cx}_c100Kg20K_p1024n64.sh"
+        fname = f"./slurm/scripts/cluster_pucn/dcomplete_pbmc{
+            cx}_c100Kg20K_p1024n64.sh"
         with open(fname, "w") as fx:
             fx.write(script_contents)
 
@@ -273,12 +288,19 @@ def gen20k_complete_scripts():
 def gen20k_complete1280_scripts():
     for cx in RSC20K_CAT:
         script_contents = SCRIPT1280_FORMAT_20K.format(c=cx)
-        fname = f"./slurm/scripts/cluster_pucn/dcomplete_pbmc{cx}_c100Kg20K_p1280n64.sh"
+        fname = f"./slurm/scripts/cluster_pucn/dcomplete_pbmc{
+            cx}_c100Kg20K_p1280n64.sh"
         with open(fname, "w") as fx:
             fx.write(script_contents)
 
 
 if __name__ == "__main__":
+    import os
+
+    os.makedirs("slurm/scripts/cluster_pucn", exist_ok=True)
+    os.makedirs("config/cluster_pucn", exist_ok=True)
+    gen5k_cmd()
+    # gen5k_complete()
     # gen20k_complete()
     # gen20k_complete_scripts()
-    gen20k_complete1280_scripts()
+    # gen20k_complete1280_scripts()
