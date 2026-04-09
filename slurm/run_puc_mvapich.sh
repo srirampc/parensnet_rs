@@ -64,9 +64,8 @@ MPI_ARGS="-ppn $NPR"
 #MPI_ARGS="--map-by node"
 #MPI_ARGS=""
 fi
-HDF5_DIR=/storage/ideas/is-schockalingam6-0/phe/spack/opt/spack/linux-cascadelake/hdf5-1.14.6-ijvczkid4msgmpvss75tjiortvvhgyl4/lib
-MPI_DIR=/storage/ideas/is-schockalingam6-0/phe/spack/opt/spack/linux-cascadelake/mvapich-4.1-sl5jrxvquujoy7vlwjnqiqiw72rwkyua/lib
-export LD_LIBRARY_PATH=$MPI_DIR:$LD_LIBRARY_PATH
+HDF5_DIR=$HOME/data/spack/opt/spack/linux-cascadelake/hdf5-1.14.6-ijvczkid4msgmpvss75tjiortvvhgyl4/lib
+export LD_LIBRARY_PATH=$MPI_ROOT/lib:$LD_LIBRARY_PATH
 export LD_LIBRARY_PATH=$HDF5_DIR:$LD_LIBRARY_PATH
 export LD_LIBRARY_PATH
 RUST_LOG=$RLOG
