@@ -1,0 +1,20 @@
+h5ad_file: "./out/pbmc800K.30K/pbmc800K.30K.h5ad"
+row_major_h5_file: "./out/pbmc800K.30K/pbmc800K.30K.rmajor.h5"
+misi_data_file: "./out/pbmc800K.30K/adata.800K.30K.olmisidata.h5"
+hist_data_file: "./out/pbmc800K.30K/adata.800K.30K.nodes.h5"
+puc_file: "./out/pbmc800K.30K/adata.800K.30K.ol_lmr_puc.h5"
+pidc_file: "./out/pbmc800K.30K/adata.800K.30K.ol_lmr_pidc.h5"
+#
+nrounds: 0
+nsamples: 0
+nobs: 0
+nvars: 0
+mode:
+  - "misi"
+  #- "hist_dist"
+  #- "samples_ranges"
+  #- "puc2pidc"
+tbase: "2"
+save_nodes: False
+save_node_pairs: True
+lmr_only: True
