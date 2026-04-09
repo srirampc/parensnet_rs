@@ -1,5 +1,7 @@
 #!/bin/python
 import subprocess
+import os
+import sys
 
 P20K5K = {
     "misi": [
@@ -177,6 +179,18 @@ P100K10K = {
         "dpuc_pbmc_c100Kg10K_p512n32.sh",
         "dpuc_pbmc_c100Kg10K_p1024n64.sh",
     ],
+    "dmisipuc": [
+        # "dmisipuc_pbmc_c100Kg10K_p2n1.sh",
+        # "dmisipuc_pbmc_c100Kg10K_p4n1.sh",
+        # "dmisipuc_pbmc_c100Kg10K_p8n1.sh",
+        "dmisipuc_pbmc_c100Kg10K_p16n16.sh",
+        "dmisipuc_pbmc_c100Kg10K_p32n16.sh",
+        "dmisipuc_pbmc_c100Kg10K_p64n16.sh",
+        "dmisipuc_pbmc_c100Kg10K_p128n16.sh",
+        "dmisipuc_pbmc_c100Kg10K_p256n16.sh",
+        "dmisipuc_pbmc_c100Kg10K_p512n32.sh",
+        "dmisipuc_pbmc_c100Kg10K_p1024n64.sh",
+    ],
 }
 
 P100K12K = {
@@ -240,6 +254,19 @@ P100K12K = {
         "dpuc_pbmc_c100Kg12K_p512n32.sh",
         "dpuc_pbmc_c100Kg12K_p1024n64.sh",
     ],
+    "dmisipuc": [
+        # "dmisipuc_pbmc_c100Kg12K_p2n1.sh",
+        # "dmisipuc_pbmc_c100Kg12K_p4n1.sh",
+        # "dmisipuc_pbmc_c100Kg12K_p8n1.sh",
+        "dmisipuc_pbmc_c100Kg12K_p16n16.sh",
+        "dmisipuc_pbmc_c100Kg12K_p32n16.sh",
+        "dmisipuc_pbmc_c100Kg12K_p64n16.sh",
+        "dmisipuc_pbmc_c100Kg12K_p128n16.sh",
+        "dmisipuc_pbmc_c100Kg12K_p256n16.sh",
+        "dmisipuc_pbmc_c100Kg12K_p512n32.sh",
+        "dmisipuc_pbmc_c100Kg12K_p1024n64.sh",
+    ],
+
 }
 
 
@@ -281,6 +308,7 @@ P100K20K_CLUSTER_RUNS = [
 
 SCRIPT_DIR = "./slurm/scripts/"
 CLUSTER_SCRIPT_DIR = "./slurm/scripts/cluster_pucn/"
+STRONG_SCRIPT_DIR = "./slurm/scripts/strong/"
 
 
 def submit_jobs(script_dir: str, job_list: list[str]):
@@ -291,6 +319,11 @@ def submit_jobs(script_dir: str, job_list: list[str]):
     assert first_result.stdout.startswith(b"Submitted batch job")
     parent = first_result.stdout.strip().split()[-1]
     parent = parent.decode("utf-8")
+    for script in job_list[1:]:
+        script_path = f"{script_dir}/{script}"
+        if not os.path.isfile(script_path):
+            print(f"Missing file {script_path}")
+            return 1
     for script in job_list[1:]:
         script_path = f"{script_dir}/{script}"
         parent_arg = f"afterany:{parent}"
@@ -325,7 +358,10 @@ def main():
     # submit_jobs(SCRIPT_DIR, P100K10K["dmisi"])
     # submit_jobs(SCRIPT_DIR, P100K10K["dpuc"])
     # submit_jobs(SCRIPT_DIR, P100K12K["dpuc"])
-    submit_jobs(CLUSTER_SCRIPT_DIR, P100K20K_CLUSTER_RUNS)
+    # submit_jobs(CLUSTER_SCRIPT_DIR, P100K20K_CLUSTER_RUNS)
+    #
+    submit_jobs(STRONG_SCRIPT_DIR, P100K10K["dmisipuc"])
+    submit_jobs(STRONG_SCRIPT_DIR, P100K12K["dmisipuc"])
 
 
 if __name__ == "__main__":

@@ -8,11 +8,11 @@ HEADER = """#!/bin/bash
 #SBATCH -J{name}         # Job name
 #SBATCH -Agts-saluru8-coda20          # Tracking account
 #SBATCH -N{nodes}                       # Number of nodes required
-#SBATCH --ntasks-per-node 16          # Number of cores/node required
-#SBATCH --mem-per-cpu=12G             # Memory per core
+#SBATCH --ntasks-per-node 24          # Number of cores/node required
+#SBATCH --mem=192G             # Memory per core
 #SBATCH -t{hours}:{mins:02d}:00          # Duration of the job
 #SBATCH -phive                        # Queue name
-#SBATCH -oslurm/log/%x.log            # Combined output and error
+#SBATCH -oslurm/log/strong/%x.log            # Combined output and error
 
 # Change to working directory
 cd "$SLURM_SUBMIT_DIR" || exit
@@ -65,7 +65,7 @@ class ScalingRun(abc.ABC):
             config_file, nproc, self.node_limit() if nproc > self.node_cores() else None
         )
 
-    def generate_commands(self, name, hours, mins, config_file):
+    def generate_commands(self, name, hours, mins, config_file, nruns):
         def job_name(nproc):
             nodes = self.nodes_for(nproc)
             return f"{name}_p{nproc}n{nodes}"
@@ -75,15 +75,16 @@ class ScalingRun(abc.ABC):
             return f"{jname}.sh"
 
         def gen_command(nproc):
-            return self.header_for(
-                nproc, job_name(nproc), hours, mins
-            ) + self.command_for(nproc, config_file)
+            header = self.header_for(nproc, job_name(nproc), hours, mins)
+            cmd = self.command_for(nproc, config_file)
+            run_cmd = "".join([cmd for _ in range(nruns)])
+            return header + run_cmd
 
         return {x: (file_name(x), gen_command(x)) for x in self.run_procs()}
 
-    def generate_sbatches(self, hours, mins, config_file, out_dir):
+    def generate_sbatches(self, hours, mins, config_file, out_dir, nruns=1):
         name = pathlib.Path(config_file).stem
-        cmds_dict = self.generate_commands(name, hours, mins, config_file)
+        cmds_dict = self.generate_commands(name, hours, mins, config_file, nruns)
         print("Generating Files:  ", [fx for (fx, _) in cmds_dict.values()])
         for f_name, script_str in cmds_dict.values():
             with open(f"{out_dir}/{f_name}", "w") as fptr:
@@ -118,37 +119,92 @@ class Pow32Scaling(ScalingRun):
         return 24
 
 
-def main():
-    # Pow2Scaling().generate_sbatches(1, 0, "misi_pbmc_c20Kg0K500.yml", "./slurm/scripts/")
-    # Pow2Scaling().generate_sbatches(1, 0, "misi_pbmc_c20Kg5K.yml", "./slurm/scripts/")
-    # Pow2Scaling().generate_sbatches(1, 0, "misi_pbmc_c100Kg5K.yml", "./slurm/scripts/")
-    # Pow2Scaling().generate_sbatches(1, 0, "misi_pbmc_c100Kg10K.yml", "./slurm/scripts/")
-    # Pow2Scaling().generate_sbatches(1, 0, "misi_pbmc_c100Kg12K.yml", "./slurm/scripts/")
-    # Pow2Scaling().generate_sbatches(1, 0, "lpuc_pbmc_c20Kg5K.yml", "./slurm/scripts/")
-    # Pow2Scaling().generate_sbatches(1, 0, "lpuc_pbmc_c100Kg5K.yml", "./slurm/scripts/")
-    # Pow2Scaling().generate_sbatches(1, 0, "lpuc_pbmc_c100Kg10K.yml", "./slurm/scripts/")
-    # Pow2Scaling().generate_sbatches(1, 0, "lpuc_pbmc_c100Kg12K.yml", "./slurm/scripts/")
-    # Pow2Scaling().generate_sbatches(1, 0, "dhist_pbmc_c20Kg5K.yml", "./slurm/scripts/")
+def misi():
+    Pow2Scaling().generate_sbatches(
+        1, 0, "misi_pbmc_c20Kg0K500.yml", "./slurm/scripts/"
+    )
+    Pow2Scaling().generate_sbatches(1, 0, "misi_pbmc_c20Kg5K.yml", "./slurm/scripts/")
+    Pow2Scaling().generate_sbatches(1, 0, "misi_pbmc_c100Kg5K.yml", "./slurm/scripts/")
+    Pow2Scaling().generate_sbatches(1, 0, "misi_pbmc_c100Kg10K.yml", "./slurm/scripts/")
+    Pow2Scaling().generate_sbatches(1, 0, "misi_pbmc_c100Kg12K.yml", "./slurm/scripts/")
+
+
+def lpuc():
+    Pow2Scaling().generate_sbatches(1, 0, "lpuc_pbmc_c20Kg5K.yml", "./slurm/scripts/")
+    Pow2Scaling().generate_sbatches(1, 0, "lpuc_pbmc_c100Kg5K.yml", "./slurm/scripts/")
+    Pow2Scaling().generate_sbatches(1, 0, "lpuc_pbmc_c100Kg10K.yml", "./slurm/scripts/")
+    Pow2Scaling().generate_sbatches(1, 0, "lpuc_pbmc_c100Kg12K.yml", "./slurm/scripts/")
+
+
+def dmisi():
     # Pow2Scaling().generate_sbatches(1, 0, "dmisi_pbmc_c20Kg5K.yml", "./slurm/scripts/")
-    Pow2Scaling().generate_sbatches(0, 30, "dmisi_pbmc_c100Kg1K.yml", "./slurm/scripts/")
-    Pow2Scaling().generate_sbatches(0, 30, "dmisi_pbmc_c100Kg3K.yml", "./slurm/scripts/")
-    Pow2Scaling().generate_sbatches(1, 00, "dmisi_pbmc_c100Kg5K.yml", "./slurm/scripts/")
-    Pow2Scaling().generate_sbatches(1, 00, "dmisi_pbmc_c100Kg8K.yml", "./slurm/scripts/")
-    Pow2Scaling().generate_sbatches(1, 00, "dmisi_pbmc_c100Kg10K.yml", "./slurm/scripts/")
-    Pow2Scaling().generate_sbatches(1, 00, "dmisi_pbmc_c100Kg12K.yml", "./slurm/scripts/")
+    Pow2Scaling().generate_sbatches(
+        0, 30, "dmisi_pbmc_c100Kg1K.yml", "./slurm/scripts/"
+    )
+    Pow2Scaling().generate_sbatches(
+        0, 30, "dmisi_pbmc_c100Kg3K.yml", "./slurm/scripts/"
+    )
+    Pow2Scaling().generate_sbatches(
+        1, 00, "dmisi_pbmc_c100Kg5K.yml", "./slurm/scripts/"
+    )
+    Pow2Scaling().generate_sbatches(
+        1, 00, "dmisi_pbmc_c100Kg8K.yml", "./slurm/scripts/"
+    )
+    Pow2Scaling().generate_sbatches(
+        1, 00, "dmisi_pbmc_c100Kg10K.yml", "./slurm/scripts/"
+    )
+    Pow2Scaling().generate_sbatches(
+        1, 00, "dmisi_pbmc_c100Kg12K.yml", "./slurm/scripts/"
+    )
+
+
+def dpuc():
     # Pow2Scaling().generate_sbatches(1, 0, "dpuc_pbmc_c20Kg5K.yml", "./slurm/scripts/")
     Pow2Scaling().generate_sbatches(0, 30, "dpuc_pbmc_c100Kg1K.yml", "./slurm/scripts/")
     Pow2Scaling().generate_sbatches(0, 30, "dpuc_pbmc_c100Kg3K.yml", "./slurm/scripts/")
     Pow2Scaling().generate_sbatches(1, 00, "dpuc_pbmc_c100Kg5K.yml", "./slurm/scripts/")
     Pow2Scaling().generate_sbatches(1, 00, "dpuc_pbmc_c100Kg8K.yml", "./slurm/scripts/")
-    Pow2Scaling().generate_sbatches(1, 00, "dpuc_pbmc_c100Kg10K.yml", "./slurm/scripts/")
-    Pow2Scaling().generate_sbatches(1, 00, "dpuc_pbmc_c100Kg12K.yml", "./slurm/scripts/")
-    # Pow2Scaling().generate_sbatches(1, 0, "dhist_pbmc_c100Kg5K.yml", "./slurm/scripts/")
-    # Pow2Scaling().generate_sbatches(1, 0, "dhist_pbmc_c100Kg10K.yml", "./slurm/scripts/")
-    # Pow2Scaling().generate_sbatches(1, 0, "dhist_pbmc_c100Kg12K.yml", "./slurm/scripts/")
+    Pow2Scaling().generate_sbatches(
+        1, 00, "dpuc_pbmc_c100Kg10K.yml", "./slurm/scripts/"
+    )
+    Pow2Scaling().generate_sbatches(
+        1, 00, "dpuc_pbmc_c100Kg12K.yml", "./slurm/scripts/"
+    )
+
+
+def dhist():
+    # Pow2Scaling().generate_sbatches(1, 0, "dhist_pbmc_c20Kg5K.yml", "./slurm/scripts/")
+    Pow2Scaling().generate_sbatches(1, 0, "dhist_pbmc_c100Kg5K.yml", "./slurm/scripts/")
+    Pow2Scaling().generate_sbatches(
+        1, 0, "dhist_pbmc_c100Kg10K.yml", "./slurm/scripts/"
+    )
+    Pow2Scaling().generate_sbatches(
+        1, 0, "dhist_pbmc_c100Kg12K.yml", "./slurm/scripts/"
+    )
+
+
+def dnodes2misi():
     # Pow2Scaling().generate_sbatches(1, 0, "dnodes2misi_pbmc_c100Kg5K.yml", "./slurm/scripts/")
     # Pow2Scaling().generate_sbatches(2, 0, "dnodes2misi_pbmc_c100Kg10K.yml", "./slurm/scripts/")
     # Pow2Scaling().generate_sbatches(2, 0, "dnodes2misi_pbmc_c100Kg12K.yml", "./slurm/scripts/")
+    pass
+
+
+def dmisipuc():
+    # Pow2Scaling().generate_sbatches(
+    #     1, 30, "dmisipuc_pbmc_c100Kg10K.yml", "./slurm/scripts/strong/", 3
+    # )
+    # Pow2Scaling().generate_sbatches(
+    #     1, 30, "dmisipuc_pbmc_c100Kg12K.yml", "./slurm/scripts/strong/", 3)
+    #
+    # Pow2Scaling().generate_sbatches(
+    #    1, 00, "dmisipuc_pbmc_c100Kg5K.yml", "./slurm/scripts/strong/", 3)
+    Pow2Scaling().generate_sbatches(
+        1, 00, "dmisipuc_pbmc_c100Kg3K.yml", "./slurm/scripts/strong/", 3)
+
+
+def main():
+    dmisipuc()
 
 
 if __name__ == "__main__":
