@@ -6,8 +6,10 @@ Cargo.lock
 __pycache__
 a.out
 config/cluster_pucn
+config/pucn/dnodes2lmr2_pbmc_c800Kg20K.yml
 config/pucn/dnodes2misi2_pbmc_c800Kg20K.yml
 config/pucn/dnodes2misi3_pbmc_c800Kg20K.yml
+config/pucn/dnodes2_pbmc_c800Kg20K.yml
 config/pucn/dnodes3_pbmc_c800Kg20K.yml
 config/pucn/dnodes3_pbmc_c800Kg30K.yml
 config/pucn/dpuc3_pbmc_c800Kg20K.yml
