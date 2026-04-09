@@ -6,6 +6,13 @@ Cargo.lock
 __pycache__
 a.out
 config/cluster_pucn
+config/pucn/dnodes2misi2_pbmc_c800Kg20K.yml
+config/pucn/dnodes2misi3_pbmc_c800Kg20K.yml
+config/pucn/dnodes3_pbmc_c800Kg20K.yml
+config/pucn/dnodes3_pbmc_c800Kg30K.yml
+config/pucn/dpuc3_pbmc_c800Kg20K.yml
+config/pucn/olmisi2_pbmc_c800Kg20K.yml
+config/pucn/olmisi3_pbmc_c800Kg20K.yml
 data/pbmc/adata.20k.500.H100.par_puc.h5
 data/pbmc/adata.20k.500.h5ad
 data/pbmc/adata.20k.500.misidata.h5
@@ -27,6 +34,9 @@ out
 out0
 rtree/
 slurm/cluser_pucn_log_times.csv
+slurm/cluster_pucn_log_times.csv
+slurm/log_times.csv
+slurm/log_times_100K.csv
 slurm/local/
 slurm/scripts/
 target/
