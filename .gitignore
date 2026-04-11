@@ -29,8 +29,6 @@ data/unit_tests/pbmc_puc_test.h5ad
 data/unit_tests/puc_data.json.gz
 data/unit_tests/puc_data.json.zip
 data/unit_tests/puc_data4.json.gz
-ext/
-ext/lightgbm3-rs
 log/
 out
 out0
