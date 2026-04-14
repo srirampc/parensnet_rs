@@ -47,7 +47,7 @@ if ! command -v spack >/dev/null 2>&1
 then
     echo "spack could not be found; assuming default environment"
 else
-    spack load openmpi hdf5
+    spack load hdf5 openmpi
 fi
 
 echo ------------------ENV-------------------
@@ -64,7 +64,10 @@ MPI_ARGS="--map-by ppr:$NPR:node"
 #MPI_ARGS="--map-by node"
 #MPI_ARGS=""
 fi
-LD_LIBRARY_PATH="$(mpicc -showme:libdirs):$LD_LIBRARY_PATH"  
+H5_DIR=$HOME/data/spack/opt/spack/linux-cascadelake/hdf5-1.14.6-rxc63z2rkdnzso55cv5ieztkzsu33wyc/lib
+MPI_LIB_DIR=$(mpicc -showme:libdirs)
+export LD_LIBRARY_PATH=$MPI_LIB_DIR:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=$H5_DIR:$LD_LIBRARY_PATH
 export LD_LIBRARY_PATH
 RUST_LOG=$RLOG
 export RUST_LOG
@@ -73,6 +76,8 @@ echo "mpirun PATH     :: $(which mpirun)"
 echo "LD_LIBRARY_PATH :: $LD_LIBRARY_PATH" 
 echo "RUST_LOG        :: $RUST_LOG" 
 echo mpirun -np "$NP" "$MPI_ARGS" "$P_EXE" "$P_CFG"
+ldd $P_EXE
+$P_EXE --help
 mpirun --help
 mpirun -np $NP $MPI_ARGS $P_EXE $P_CFG
 

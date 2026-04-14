@@ -12,7 +12,7 @@ use crate::{
 use anyhow::Result;
 use hdf5::{File, H5Type};
 use itertools::Itertools;
-use mpi::traits::Equivalence;
+use mpi::{datatype::DatatypeRef, traits::Equivalence};
 use ndarray::{Array1, Array2};
 use num::ToPrimitive;
 use sope::{
@@ -20,6 +20,7 @@ use sope::{
     gather_debug,
     partition::{ArbitDist, Dist, InterleavedDist},
     timer::SectionTimer,
+    traits::GEquivalence,
 };
 use std::{
     fmt::Display,
@@ -489,6 +490,14 @@ where
     }
 }
 
+#[derive(GEquivalence, Clone, Default)]
+struct LMREntry<IntT, FloatT> {
+    x: IntT,
+    y: IntT,
+    msum: FloatT,
+    ind: bool,
+}
+
 pub struct DistLMRMinSum<'a, IntT, FloatT> {
     dist: &'a DistLMR<FloatT>,
     pair_x: Array1<IntT>,
@@ -499,8 +508,17 @@ pub struct DistLMRMinSum<'a, IntT, FloatT> {
 
 impl<'a, IntT, FloatT> DistLMRMinSum<'a, IntT, FloatT>
 where
-    IntT: PNInteger + H5Type + Default + Equivalence,
-    FloatT: 'static + PNFloat + H5Type + Default + Equivalence,
+    IntT: PNInteger
+        + H5Type
+        + Default
+        + Clone
+        + Equivalence<Out = DatatypeRef<'static>>,
+    FloatT: 'static
+        + PNFloat
+        + H5Type
+        + Default
+        + Clone
+        + Equivalence<Out = DatatypeRef<'static>>,
 {
     pub fn from_unif_vars(
         cx: &CommIfx,
@@ -516,11 +534,8 @@ where
         let mut offsets: Vec<usize> =
             exc_prefix_sum(counts.clone().into_iter(), 1);
         let size = counts.iter().sum::<usize>();
-        let mut px_vec = vec![IntT::zero(); size];
-        let mut py_vec = vec![IntT::zero(); size];
-        let mut msum_vec = vec![FloatT::zero(); size];
-        let mut msum_ind = vec![false; size];
         let mut nctx = 0;
+        let mut entries = vec![LMREntry::<IntT, FloatT>::default(); size];
         for v_about in dist.var_dist.range() {
             // 1. lmr slice corresponding to variable vi
             let lslice = dist.local_lmr_slice_for(v_about);
@@ -540,15 +555,15 @@ where
                 // 4. Place as the specific offests.
                 let mown = dist.mi_pair2owner((v_about, v_by)) as usize;
                 let loc = offsets[mown];
-                msum_vec[loc] = msum;
+                entries[loc].msum = msum;
                 if v_about < v_by {
-                    px_vec[loc] = var_ints[v_about];
-                    py_vec[loc] = var_ints[v_by];
-                    msum_ind[loc] = true;
+                    entries[loc].x = var_ints[v_about];
+                    entries[loc].y = var_ints[v_by];
+                    entries[loc].ind = true;
                 } else {
-                    px_vec[loc] = var_ints[v_by];
-                    py_vec[loc] = var_ints[v_about];
-                    msum_ind[loc] = false;
+                    entries[loc].x = var_ints[v_by];
+                    entries[loc].y = var_ints[v_about];
+                    entries[loc].ind = false;
                 }
                 offsets[mown] += 1;
                 nctx += 1;
@@ -556,27 +571,22 @@ where
         }
         s_timer.info_section("Dist PUC::LMR Minsum:: LMR Build");
         s_timer.reset();
+        gather_debug!(cx.comm(); "COUNTS {:?}", counts);
         gather_debug!(cx.comm(); "SX {} {}", nctx, size);
         debug_assert!(nctx == size);
-        debug_assert!(itertools::all(
-            zip(px_vec.iter(), py_vec.iter()),
-            |(x, y)| *x < *y
-        ));
+        debug_assert!(itertools::all(entries.iter(), |ety| ety.x < ety.y));
 
         let recv_counts = all2all_vec(&counts, cx.comm())?;
-        let px_vec = all2allv_vec(&px_vec, &counts, &recv_counts, cx.comm())?;
-        let pair_x: Array1<IntT> = Array1::from_vec(px_vec);
-        let py_vec = all2allv_vec(&py_vec, &counts, &recv_counts, cx.comm())?;
-        let pair_y: Array1<IntT> = Array1::from_vec(py_vec);
-        let msum_vec = all2allv_vec(&msum_vec, &counts, &recv_counts, cx.comm())?;
-        let minsum: Array1<FloatT> = Array1::from_vec(msum_vec);
-        let msum_ind = all2allv_vec(&msum_ind, &counts, &recv_counts, cx.comm())?;
-        let minsum_ind: Array1<bool> = Array1::from_vec(msum_ind);
-        debug_assert!(itertools::all(
-            zip(pair_x.iter(), pair_y.iter()),
-            |(x, y)| *x < *y
-        ));
+        gather_debug!(cx.comm(); "RECV_COUNTS {:?}", recv_counts);
+        let entries = all2allv_vec(&entries, &counts, &recv_counts, cx.comm())?;
+        gather_debug!(cx.comm(); "ENTRIES {:?}", entries.len());
+        debug_assert!(itertools::all(entries.iter(), |ety| ety.x < ety.y));
         s_timer.info_section("Dist PUC::LMR Minsum:: LMR All2All");
+        let size = entries.len();
+        let pair_x = Array1::from_shape_fn(size, |i| entries[i].x);
+        let pair_y = Array1::from_shape_fn(size, |i| entries[i].y);
+        let minsum = Array1::from_shape_fn(size, |i| entries[i].msum);
+        let minsum_ind = Array1::from_shape_fn(size, |i| entries[i].ind);
 
         Ok(Self {
             dist,
@@ -600,8 +610,17 @@ struct PUCDistWorkFlowHelper<SizeT, IntT, FloatT> {
 impl<SizeT, IntT, FloatT> PUCDistWorkFlowHelper<SizeT, IntT, FloatT>
 where
     SizeT: 'static + PNInteger + H5Type + Default + Equivalence,
-    IntT: PNInteger + H5Type + Default + Equivalence,
-    FloatT: 'static + PNFloat + H5Type + Default + Equivalence,
+    IntT: PNInteger
+        + H5Type
+        + Default
+        + Clone
+        + Equivalence<Out = DatatypeRef<'static>>,
+    FloatT: 'static
+        + PNFloat
+        + H5Type
+        + Default
+        + Clone
+        + Equivalence<Out = DatatypeRef<'static>>,
 {
     fn var_uniform_dist(wf: &PUCDistWorkflow) -> Result<DistLMR<FloatT>> {
         DistLMR::<FloatT>::with_mode::<SizeT, IntT>(
