@@ -64,7 +64,7 @@ MPI_ARGS="--map-by ppr:$NPR:node"
 #MPI_ARGS="--map-by node"
 #MPI_ARGS=""
 fi
-H5_DIR=$HOME/data/spack/opt/spack/linux-cascadelake/hdf5-1.14.6-rxc63z2rkdnzso55cv5ieztkzsu33wyc/lib
+H5_DIR=$(spack location -i hdf5)/lib
 MPI_LIB_DIR=$(mpicc -showme:libdirs)
 export LD_LIBRARY_PATH=$MPI_LIB_DIR:$LD_LIBRARY_PATH
 export LD_LIBRARY_PATH=$H5_DIR:$LD_LIBRARY_PATH

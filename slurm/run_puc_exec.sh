@@ -49,8 +49,8 @@ printenv | grep '^SLURM'
 printenv | grep -E 'MPI'
 echo ---------------------------------------
 
-HDF5_DIR=/storage/ideas/is-schockalingam6-0/phe/spack/opt/spack/linux-cascadelake/hdf5-1.14.6-ijvczkid4msgmpvss75tjiortvvhgyl4/lib
-MPI_DIR=storage/ideas/is-schockalingam6-0/phe/spack/opt/spack/linux-cascadelake/mvapich-4.1-sl5jrxvquujoy7vlwjnqiqiw72rwkyua/lib
+HDF5_DIR=$(spack location -i hdf5)/lib
+MPI_DIR=$MPI_ROOT/lib
 export LD_LIBRARY_PATH=$HDF5_DIR:$LD_LIBRARY_PATH
 export LD_LIBRARY_PATH=$MPI_DIR:$LD_LIBRARY_PATH
 RUST_LOG=$RLOG

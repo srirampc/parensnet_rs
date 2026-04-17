@@ -47,7 +47,7 @@ if ! command -v spack >/dev/null 2>&1
 then
     echo "spack could not be found; assuming default environment"
 else
-    spack load mvapich hdf5
+    spack load hdf5 openmpi
 fi
 
 echo ------------------ENV-------------------
@@ -57,16 +57,18 @@ printenv | grep -E 'MPI'
 echo ---------------------------------------
 
 if [ -z "$NPR" ]; then 
-MPI_ARGS="--bind-to core"
+SRUN_ARGS="-n $NP"
 else
-MPI_ARGS="-ppn $NPR"
+SRUN_ARGS="-n $NP --ntasks-per-node=$NPR"
+#
 #MPI_ARGS="--npernode $NPR"
 #MPI_ARGS="--map-by node"
 #MPI_ARGS=""
 fi
-HDF5_DIR=$(spack location -i hdf5)/lib
-export LD_LIBRARY_PATH=$MPI_ROOT/lib:$LD_LIBRARY_PATH
-export LD_LIBRARY_PATH=$HDF5_DIR:$LD_LIBRARY_PATH
+H5_DIR=$(spack location -i hdf5)/lib
+MPI_LIB_DIR=$(mpicc -showme:libdirs)
+export LD_LIBRARY_PATH=$MPI_LIB_DIR:$LD_LIBRARY_PATH
+export LD_LIBRARY_PATH=$H5_DIR:$LD_LIBRARY_PATH
 export LD_LIBRARY_PATH
 RUST_LOG=$RLOG
 export RUST_LOG
@@ -74,12 +76,11 @@ export RUST_LOG
 echo "mpirun PATH     :: $(which mpirun)"
 echo "LD_LIBRARY_PATH :: $LD_LIBRARY_PATH" 
 echo "RUST_LOG        :: $RUST_LOG" 
-echo mpiexec -np "$NP" "$MPI_ARGS" "$P_EXE" "$P_CFG"
+echo srun --mpi=pmix "$SRUN_ARGS" "$P_EXE" "$P_CFG"
 ldd $P_EXE
 $P_EXE --help
 unset LUA_PATH
 unset LUA_CPATH
-#mpirun --help
-LD_LIBRARY_PATH=$LD_LIBRARY_PATH mpiexec -np $NP $MPI_ARGS $P_EXE $P_CFG
+srun  --mpi=pmix "$SRUN_ARGS" "$P_EXE" "$P_CFG"
 
-spack unload mvapich hdf5
+spack unload openmpi hdf5
