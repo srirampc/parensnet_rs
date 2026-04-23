@@ -11,9 +11,8 @@ log = logging.getLogger(__name__)
 
 def read_timer_data(log_fname: str):
     with open(log_fname) as fptr:
-        lines = [
-            x.strip().split("]")[-1].strip() for x in fptr.readlines() if "TIMER" in x
-        ]
+        fplines = [x for x in fptr.readlines() if "TIMER" in x]
+        lines = [x.strip().split("]")[-1].strip() for x in fplines]
         return [lx.split(",")[1:] for lx in lines]
 
 
@@ -94,7 +93,11 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     # main_pattern("slurm/log/", "*.log", "slurm/log_times.csv")
-    # main_pattern("slurm/log/cluster_pucn/", "*.log", "slurm/cluster_pucn_log_times.csv")
+    # main_pattern(
+    #     "slurm/log/cluster_pucn/",
+    #     "*.log",
+    #     "slurm/cluster_pucn_log_times.csv"
+    # )
     # main_pattern("log/", "*.log", "log/pidc_log_times.csv")
     # main_pattern("./log/", "*pbmcl*.log", "slurm/cluser_pucn_log_times.csv")
     main(args.files, args.output)
