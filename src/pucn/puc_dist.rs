@@ -498,6 +498,8 @@ struct LMREntry<IntT, FloatT> {
     ind: bool,
 }
 
+type LMREntryList<IntT, FloatT> = (Vec<LMREntry<IntT, FloatT>>, Vec<usize>);
+
 pub struct DistLMRMinSum<'a, IntT, FloatT> {
     dist: &'a DistLMR<FloatT>,
     pair_x: Array1<IntT>,
@@ -520,10 +522,10 @@ where
         + Clone
         + Equivalence<Out = DatatypeRef<'static>>,
 {
-    pub fn from_unif_vars(
+    fn init_unif_vars(
         cx: &CommIfx,
         dist: &'a DistLMR<FloatT>,
-    ) -> Result<Self> {
+    ) -> Result<LMREntryList<IntT, FloatT>> {
         assert!(dist.mode == DistMode::VarUniform);
         let s_timer = SectionTimer::from_comm(cx.comm(), ",");
         let var_ints: Vec<IntT> = (0..dist.nvars())
@@ -575,13 +577,24 @@ where
         gather_debug!(cx.comm(); "SX {} {}", nctx, size);
         debug_assert!(nctx == size);
         debug_assert!(itertools::all(entries.iter(), |ety| ety.x < ety.y));
+        Ok((entries, counts))
+    }
 
-        let recv_counts = all2all_vec(&counts, cx.comm())?;
-        gather_debug!(cx.comm(); "RECV_COUNTS {:?}", recv_counts);
-        let entries = all2allv_vec(&entries, &counts, &recv_counts, cx.comm())?;
-        gather_debug!(cx.comm(); "ENTRIES {:?}", entries.len());
-        debug_assert!(itertools::all(entries.iter(), |ety| ety.x < ety.y));
-        s_timer.info_section("Dist PUC::LMR Minsum:: LMR All2All");
+    pub fn from_unif_vars(
+        cx: &CommIfx,
+        dist: &'a DistLMR<FloatT>,
+    ) -> Result<Self> {
+        let (entries, counts) = Self::init_unif_vars(cx, dist)?;
+        if cx.size > 1 {
+            let s_timer = SectionTimer::from_comm(cx.comm(), ",");
+            let recv_counts = all2all_vec(&counts, cx.comm())?;
+            gather_debug!(cx.comm(); "RECV_COUNTS {:?}", recv_counts);
+            let entries =
+                all2allv_vec(&entries, &counts, &recv_counts, cx.comm())?;
+            gather_debug!(cx.comm(); "ENTRIES {:?}", entries.len());
+            debug_assert!(itertools::all(entries.iter(), |ety| ety.x < ety.y));
+            s_timer.info_section("Dist PUC::LMR Minsum:: LMR All2All");
+        }
         let size = entries.len();
         let pair_x = Array1::from_shape_fn(size, |i| entries[i].x);
         let pair_y = Array1::from_shape_fn(size, |i| entries[i].y);

@@ -15,6 +15,9 @@ config/pucn/dnodes3_pbmc_c800Kg30K.yml
 config/pucn/dpuc3_pbmc_c800Kg20K.yml
 config/pucn/olmisi2_pbmc_c800Kg20K.yml
 config/pucn/olmisi3_pbmc_c800Kg20K.yml
+data/pbmc20K.zip
+data/pbmc/adata.20K.5K.h5ad
+data/pbmc/adata.20K.5K.rmajor.h5
 data/pbmc/adata.20k.500.H100.par_puc.h5
 data/pbmc/adata.20k.500.h5ad
 data/pbmc/adata.20k.500.misidata.h5
@@ -37,7 +40,6 @@ slurm/cluser_pucn_log_times.csv
 slurm/cluster_pucn_log_times.csv
 slurm/log_times.csv
 slurm/log_times_100K.csv
-slurm/local/
 slurm/scripts/
 target/
 test/

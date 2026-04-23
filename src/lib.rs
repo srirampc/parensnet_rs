@@ -1,6 +1,8 @@
 pub mod comm;
+pub mod corr;
 pub mod h5;
 pub mod hist;
+pub mod mcpn;
 pub mod mvim;
 pub mod types;
 pub mod util;

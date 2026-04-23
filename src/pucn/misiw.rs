@@ -4,7 +4,7 @@ use anyhow::{Ok, Result};
 use mpi::traits::CommunicatorCollectives;
 use sope::{
     reduction::{all_of, allreduce_sum},
-    timer::{SectionTimer, CumulativeTimer},
+    timer::{CumulativeTimer, SectionTimer},
 };
 
 use super::{
@@ -57,8 +57,12 @@ impl<'a> MISIWorkFlow<'a> {
     ) -> Result<()> {
         type HelperT = MISIWorkFlowHelper<i64, i32, f32>;
         let s_timer = SectionTimer::from_comm(self.mpi_ifx.comm(), ",");
-        let npairs_mi = npairs_mi
-            .distribute(self.mpi_ifx, nodes.hist_dim.as_slice().unwrap())?;
+        let npairs_mi = if self.mpi_ifx.size > 1 {
+            npairs_mi
+                .distribute(self.mpi_ifx, nodes.hist_dim.as_slice().unwrap())?
+        } else {
+            npairs_mi
+        };
         if log::log_enabled!(log::Level::Info) {
             s_timer.info_section("Node Pairs MI Distribution");
             let n_mi =
@@ -69,7 +73,11 @@ impl<'a> MISIWorkFlow<'a> {
             s_timer.reset();
         }
 
-        let mut npairs_si = npairs_si.distribute(self.mpi_ifx)?;
+        let mut npairs_si = if self.mpi_ifx.size > 1 {
+            npairs_si.distribute(self.mpi_ifx)?
+        } else {
+            npairs_si
+        };
         if log::log_enabled!(log::Level::Info) {
             s_timer.info_section("Node Pairs SI Distribution");
             let n_sipx =
@@ -212,8 +220,12 @@ impl<'a> MISIWorkFlow<'a> {
             s_timer.reset();
         }
 
-        let hist_pairs = hist_pairs
-            .distribute(self.mpi_ifx, nodes.hist_dim.as_slice().unwrap())?;
+        let hist_pairs = if self.mpi_ifx.size > 1 {
+            hist_pairs
+                .distribute(self.mpi_ifx, nodes.hist_dim.as_slice().unwrap())?
+        } else {
+            hist_pairs
+        };
         if log::log_enabled!(log::Level::Info) {
             s_timer.info_section("Node Pairs Distribution");
             let n_mi =
