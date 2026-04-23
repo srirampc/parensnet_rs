@@ -1,0 +1,16 @@
+h5ad_file: "./data/rsc.10k/adata_lei.100k.10k.h5ad"
+row_major_h5_file: "./data/rsc.10k/adata_lei.100k.10k.rmajor.h5"
+misi_data_file: "./out/rsc.10k/adata.100K.10K.misidata.h5"
+hist_data_file: "./out/rsc.10k/adata.100K.10K.hist.h5"
+puc_file: "./out/rsc.10k/adata.100K.10K.lmr_puc.h5"
+pidc_file: "./out/rsc.10k/adata.100k.10K.lmr_pidc.h5"
+#
+nrounds: 0
+nsamples: 0
+nobs: 0
+nvars: 0
+mode:
+  - "puc_lmr"
+tbase: "2"
+save_nodes: False
+save_node_pairs: True

@@ -1,4 +1,5 @@
-h5ad_file: "./data/pbmc_scrna/800K/pbmc800K.20K.h5ad"
+h5ad_file: "./data/pbmc/pbmc800K.20K.h5ad"
+row_major_h5_file: "./data/pbmc/pbmc800K.20K.rmajor.h5"
 misi_data_file: "./out/pbmc800K.20K/adata.800K.20K.hist_misidata.h5"
 hist_data_file: "./out/pbmc800K.20K/adata.800K.20K.nodes.h5"
 puc_file: "./out/pbmc800K.20K/adata.800K.20K.hist_lmr_puc.h5"
