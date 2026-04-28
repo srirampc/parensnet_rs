@@ -130,10 +130,10 @@ def data_prep(args):
         "dhist_lung_c100Kg15K.yml",
         "dhist_lung_c100Kg18K.yml",
     ]
-    sgen.slurm_configs(1, 00, config_files, dest_dir, 3, [512])
+    sgen.slurm_configs(1, 00, config_files, dest_dir, 1, [512])
 
 
-def strong_scaling(args, dest_dir):
+def strong_scaling(args):
     source_dir = os.path.expandvars(args.source_dir)
     dest_dir = f"{source_dir}/slurm/scripts/strong/"
     sgen = ScalingRunGenerator(args.account, args.source_dir, "strong")
@@ -142,7 +142,7 @@ def strong_scaling(args, dest_dir):
     sgen.pow2_scaling(1, 00, "dmisipuc_lung_c100Kg5K.yml", dest_dir, 3)
 
 
-def weak_scaling(args, dest_dir):
+def weak_scaling(args):
     source_dir = os.path.expandvars(args.source_dir)
     dest_dir = f"{source_dir}/slurm/scripts/weak/"
     sgen = ScalingRunGenerator(args.account, args.source_dir, "weak")
@@ -161,7 +161,7 @@ def weak_scaling(args, dest_dir):
     sgen.slurm_configs(1, 00, config_files, dest_dir, 3, [256])
 
 
-def big_datasets(args, dest_dir):
+def big_datasets(args):
     source_dir = os.path.expandvars(args.source_dir)
     dest_dir = f"{source_dir}/slurm/scripts/big/"
     sgen = ScalingRunGenerator(args.account, args.source_dir, "big")
@@ -200,18 +200,10 @@ def create_output_dirs(out_dir):
 
 def main(args):
     create_output_dirs(args.out_dir)
-    data_prep(
-        args,
-    )
-    strong_scaling(
-        args,
-    )
-    weak_scaling(
-        args,
-    )
-    big_datasets(
-        args,
-    )
+    data_prep(args)
+    strong_scaling(args)
+    weak_scaling(args)
+    big_datasets(args)
 
 
 if __name__ == "__main__":

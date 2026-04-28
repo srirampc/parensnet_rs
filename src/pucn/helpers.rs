@@ -509,19 +509,27 @@ where
         hist_pairs: &PairMICollection<IntT, FloatT>,
         hist_data_file: &str,
     ) -> Result<()> {
-        let rank_out_file = format!(
-            "{}.{:04}.{}",
-            hist_data_file.strip_suffix(".h5").unwrap_or_default(),
-            w.comm_ifx().rank,
-            "h5"
-        );
-        let h5_fptr = io::create_file(&rank_out_file)?;
+        // let rank_out_file = format!(
+        //     "{}.{:04}.{}",
+        //     hist_data_file.strip_suffix(".h5").unwrap_or_default(),
+        //     w.comm_ifx().rank,
+        //     "h5"
+        // );
+        // let h5_fptr = io::create_file(&rank_out_file)?;
+        // let data_group = h5_fptr.create_group("data")?;
+        // if let Some(xy_tab) = hist_pairs.xy_tab.as_ref() {
+        //     io::write_1d(&data_group, "pair_hist", xy_tab)?;
+        // }
+        // io::write_1d(&data_group, "mi", &hist_pairs.mi)?;
+        // h5_fptr.close()?;
+
+        let h5_fptr =
+            mpio::create_file(w.comm_ifx(), hist_data_file)?;
         let data_group = h5_fptr.create_group("data")?;
         if let Some(xy_tab) = hist_pairs.xy_tab.as_ref() {
-            io::write_1d(&data_group, "pair_hist", xy_tab)?;
+            mpio::block_write1d(w.comm_ifx(), &data_group, "hist", xy_tab)?;
         }
-        io::write_1d(&data_group, "mi", &hist_pairs.mi)?;
-        h5_fptr.close()?;
+        mpio::block_write1d(w.comm_ifx(), &data_group, "mi", &hist_pairs.mi)?;
         Ok(())
     }
 
