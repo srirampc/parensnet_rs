@@ -468,13 +468,11 @@ where
         }
     }
 
-    pub fn write_nodes_h5(
+    pub fn write_node_data(
         wf: &dyn MISIWorkFlowTrait,
         nodes: &NodeCollection<SizeT, IntT, FloatT>,
-        misi_data_file: &str,
+        data_group: &hdf5::Group,
     ) -> Result<()> {
-        let hfptr = io::create_file(misi_data_file)?;
-        let data_group = hfptr.create_group("data")?;
         data_group
             .new_attr::<SizeT>()
             .create("nvars")?
@@ -502,6 +500,17 @@ where
 
         io::write_1d(&data_group, "si_start", &nodes.si_start)?;
         Ok(())
+    } 
+
+    pub fn write_nodes_h5(
+        wf: &dyn MISIWorkFlowTrait,
+        nodes: &NodeCollection<SizeT, IntT, FloatT>,
+        misi_data_file: &str,
+    ) -> Result<()> {
+        let hfptr = io::create_file(misi_data_file)?;
+        let data_group = hfptr.create_group("data")?;
+        Self::write_node_data(wf, nodes, &data_group)?;
+        Ok(())
     }
 
     pub fn write_hist_pairs(
@@ -524,10 +533,10 @@ where
         // h5_fptr.close()?;
 
         let h5_fptr =
-            mpio::create_file(w.comm_ifx(), hist_data_file)?;
-        let data_group = h5_fptr.create_group("data")?;
+            mpio::open_file_rw(w.comm_ifx(), hist_data_file)?;
+        let data_group = h5_fptr.group("data")?;
         if let Some(xy_tab) = hist_pairs.xy_tab.as_ref() {
-            mpio::block_write1d(w.comm_ifx(), &data_group, "hist", xy_tab)?;
+            mpio::block_write1d(w.comm_ifx(), &data_group, "pair_hist", xy_tab)?;
         }
         mpio::block_write1d(w.comm_ifx(), &data_group, "mi", &hist_pairs.mi)?;
         Ok(())
