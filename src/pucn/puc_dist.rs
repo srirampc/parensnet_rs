@@ -585,7 +585,7 @@ where
         dist: &'a DistLMR<FloatT>,
     ) -> Result<Self> {
         let (entries, counts) = Self::init_unif_vars(cx, dist)?;
-        if cx.size > 1 {
+        let entries = if cx.size > 1 {
             let s_timer = SectionTimer::from_comm(cx.comm(), ",");
             let recv_counts = all2all_vec(&counts, cx.comm())?;
             gather_debug!(cx.comm(); "RECV_COUNTS {:?}", recv_counts);
@@ -594,7 +594,10 @@ where
             gather_debug!(cx.comm(); "ENTRIES {:?}", entries.len());
             debug_assert!(itertools::all(entries.iter(), |ety| ety.x < ety.y));
             s_timer.info_section("Dist PUC::LMR Minsum:: LMR All2All");
-        }
+            entries
+        } else {
+            entries
+        };
         let size = entries.len();
         let pair_x = Array1::from_shape_fn(size, |i| entries[i].x);
         let pair_y = Array1::from_shape_fn(size, |i| entries[i].y);
@@ -705,11 +708,17 @@ impl<'a> PUCDistWorkflow<'a> {
         s_timer.info_section("Dist PUC::LMR Minsum");
         gather_debug!(
             self.mpi_ifx.comm();
-            "Dist Minsum {} {} {} {} {}",
+            "Dist Minsum ({} {} {} {:?}) ({} {} {} {})",
             vu_dist.mi.len(),
             vu_dist.mi[0],
+            vu_dist.mi_dist.start(),
+            vu_dist.mi_dist.range(),
             dist_minsum.pair_x[0],
             dist_minsum.pair_y[0],
+            vu_dist.ixlu.mi_pair2index((
+                dist_minsum.pair_x[0].to_usize().unwrap(),
+                dist_minsum.pair_y[0].to_usize().unwrap(),
+            )),
             dist_minsum.minsum[0],
         );
         s_timer.reset();
