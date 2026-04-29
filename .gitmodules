@@ -7,3 +7,6 @@
 [submodule "ext/lightgbm-3"]
 	path = ext/lightgbm3-rs
 	url = https://github.com/srirampc/lightgbm3-rs.git
+[submodule "ext/mcpnet_rs"]
+	path = ext/mcpnet_rs
+	url = https://github.com/AluruLab/mcpnet_rs.git
