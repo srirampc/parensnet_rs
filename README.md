@@ -1,6 +1,7 @@
 # Parensnet
 
-Parallel Ensemble 
+Parallel Ensemble Gene Networks for large-scale single cell data. Generate in 
+parallel integrated networks from MI, GRNBoost and PIDC based networks.
 
 ## Installation
 
@@ -22,18 +23,22 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 `parensnet_rs` depends on the following rust wrapper libraries:
 
-- `rsmpi` requires a compatible MPI-3.1 implementation,
-- modified `hdf5-rust` that includes parallel IO 
+- `sope` an MPI-3 interface library (included as a submodel in ext/sope).
+   `sope` is built on top of `rsmpi` with additional utilties and sorting 
+   algorithms. Requires a compatible MPI-3.1 implementation,
+- a modified `hdf5-rust` that includes parallel IO 
   (included as a submodule in ext/hdf5-rust dir) is compiled from source 
   -- requires a HDF5 library installation with parallel io, and
-- modified `lightgbm3-rs` (included as a submodule in ext/ dir) 
+- a modified `lightgbm3-rs` (included as a submodule in ext/ dir) 
   is compiled from source (ext/ dir). To
   compile `lightgbm3`, cmake version 3.28 or higher is required.
+- `mcpnet_rs`, a rust wrapper around MCPNet library to run the kernels 
+   available with the MCPNet library. (included as a submodule in ext/ dir)  
 
 The following C/C++ libraries needs to be installed and be available via 
 standard paths:
 
-1. CMake version >= 3.28
+1. CMake version >= 3.29
 2. MPI implementation (mpicc/mpirun) that works with `rsmpi`
 3. HDF5 (h5cc/h5pcc) compiled with MPI support,
 4. LLM with libclang  (for `bindgen` support). 
