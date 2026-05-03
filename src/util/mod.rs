@@ -1,5 +1,6 @@
 use anyhow::{Result, bail};
-use ndarray::{Array, ArrayView, Dimension};
+use itertools::iproduct;
+use ndarray::{Array, Array1, Array2, ArrayView, Dimension};
 use num::{Float, FromPrimitive, Integer, One, ToPrimitive, Zero};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -564,6 +565,54 @@ impl EBBlocks2D {
 }
 
 ///
+/// Pair Work
+pub struct PairWorkDistributor {
+    _rank: i32,
+    _size: i32,
+    var_dist: Vec<Range<usize>>,
+    pairs1d_dist: Vec<Range<usize>>,
+    pairs2d: EBBlocks2D,
+}
+
+impl PairWorkDistributor {
+    pub fn new(nvars: usize, npairs: usize, rank: i32, size: i32) -> Self {
+        PairWorkDistributor {
+            _rank: rank,
+            _size: size,
+            var_dist: all_block_ranges(size, nvars),
+            pairs1d_dist: all_block_ranges(size, npairs),
+            pairs2d: EBBlocks2D::new_diag(nvars, size as usize),
+        }
+    }
+
+    pub fn new_seq(nvars: usize, npairs: usize, rank: i32, size: i32) -> Self {
+        PairWorkDistributor {
+            _rank: rank,
+            _size: size,
+            var_dist: all_block_ranges(size, nvars),
+            pairs1d_dist: all_block_ranges(size, npairs),
+            pairs2d: EBBlocks2D::new_seq(nvars, size as usize),
+        }
+    }
+
+    pub fn pair_blocks(&self) -> &EBBlocks2D {
+        &self.pairs2d
+    }
+
+    pub fn pairs_2d(&self) -> &dyn BatchBlocks2D {
+        self.pairs2d.trait_ref()
+    }
+
+    pub fn pairs_1d(&self) -> &[Range<usize>] {
+        &self.pairs1d_dist
+    }
+
+    pub fn vars_dist(&self) -> &[Range<usize>] {
+        &self.var_dist
+    }
+}
+
+///
 /// Unique Elements
 ///
 #[derive(Debug)]
@@ -654,6 +703,71 @@ pub fn read_csv_column(f_csv: &str, column: &str) -> Result<Vec<String>> {
     Ok(rvec)
 }
 
+pub fn pair_indices<T>(st_ranges: RangePair<usize>) -> Array2<T>
+where
+    T: Integer + AddAssign + FromPrimitive + Clone,
+{
+    let (s_range, t_range) = st_ranges;
+    let (s_vec, t_vec): (Vec<T>, Vec<T>) = iproduct!(s_range, t_range)
+        .filter(|(src, tgt)| src < tgt)
+        .map(|(src, tgt)| {
+            (T::from_usize(src).unwrap(), T::from_usize(tgt).unwrap())
+        })
+        .unzip();
+
+    let mut st_arr = Array2::<T>::zeros((s_vec.len(), 2));
+    st_arr
+        .slice_mut(ndarray::s![.., 0])
+        .assign(&Array1::from_vec(s_vec));
+    st_arr
+        .slice_mut(ndarray::s![.., 1])
+        .assign(&Array1::from_vec(t_vec));
+    st_arr
+}
+
+
+
+pub struct IdVResults<T, S> {
+    pub index: Array2<T>,
+    pub val: Array1<S>,
+}
+
+impl<T: Clone + Zero, S: Clone + Zero> IdVResults<T, S> {
+    pub fn new(index: Array2<T>, val: Array1<S>) -> Self {
+        Self { index, val }
+    }
+
+    pub fn len(&self) -> usize {
+        self.val.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.val.is_empty()
+    }
+
+    pub fn merge(vpreds: &[Self]) -> Self {
+        let nsizes: Vec<usize> = vpreds.iter().map(|x| x.len()).collect();
+        let nstarts: Vec<usize> = exc_prefix_sum(nsizes.clone().into_iter(), 1);
+        let ntotal: usize = vpreds.iter().map(|x| x.len()).sum();
+        let mut pindices: Array2<T> = Array2::zeros((ntotal, 2));
+        let mut preds: Array1<S> = Array1::zeros(ntotal);
+
+        for (idx, rstart) in nstarts.iter().enumerate() {
+            let rsize = vpreds[idx].val.len();
+            let rend = *rstart + rsize;
+            pindices
+                .slice_mut(ndarray::s![*rstart..rend, ..])
+                .assign(&vpreds[idx].index);
+            preds
+                .slice_mut(ndarray::s![*rstart..rend])
+                .assign(&vpreds[idx].val);
+        }
+        Self::new(pindices, preds)
+    }
+}
+
+
+
 #[cfg(test)]
 mod tests {
     use anyhow::Result;
@@ -667,7 +781,7 @@ mod tests {
         crate::tests::log_init();
         let n = 500;
         for i in 0..6 {
-            for j in (i+1)..6 {
+            for j in (i + 1)..6 {
                 let rk = triu_pair_to_index(n, i, j);
                 let ix: (usize, usize) = triu_index_to_pair(n, rk);
                 debug!("{} {} {} {:?}", i, j, rk, ix)

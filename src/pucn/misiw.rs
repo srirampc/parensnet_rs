@@ -8,15 +8,18 @@ use sope::{
 };
 
 use super::{
-    MISIWorkFlowTrait, WorkDistributor, WorkflowArgs,
+    MISIWorkFlowTrait, WorkflowArgs,
     ds::{NodeCollection, OrdPairSICollection, PairMICollection},
     helpers::MISIWorkFlowHelper,
 };
-use crate::{anndata::AnnData, comm::CommIfx, cond_info};
+use crate::{
+    anndata::AnnData, comm::CommIfx, cond_info, util::PairWorkDistributor,
+};
+
 
 pub struct MISIWorkFlow<'a> {
     pub mpi_ifx: &'a CommIfx,
-    pub wdistr: &'a WorkDistributor,
+    pub wdistr: &'a PairWorkDistributor,
     pub args: &'a WorkflowArgs,
     pub adata: &'a AnnData,
     pub io_timer: CumulativeTimer<'a>,
@@ -27,7 +30,7 @@ impl<'a> MISIWorkFlowTrait<'a> for MISIWorkFlow<'a> {
         self.mpi_ifx
     }
 
-    fn wf_dist(&self) -> &'a WorkDistributor {
+    fn wf_dist(&self) -> &'a PairWorkDistributor {
         self.wdistr
     }
 

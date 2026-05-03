@@ -1,3 +1,5 @@
+use std::str::FromStr;
+
 use serde::{Deserialize, Serialize};
 
 fn default_gene_id_col() -> String {
@@ -12,14 +14,25 @@ fn default_nrounds() -> usize {
     8
 }
 
-fn default_nsamples() -> usize {
-    200
+fn default_nbins() -> usize {
+    8
 }
+
+fn default_spline_order() -> usize {
+    3
+}
+
+fn default_weights_attr() -> String {
+    String::from_str("weights").unwrap_or_default()
+}
+
 
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 pub enum RunMode {
-    #[serde(alias = "mi")]
-    MI,
+    #[serde(alias = "mi_bspline_weights")]
+    MIBSplineWeights,
+    #[serde(alias = "mi_bspline")]
+    MIBSpline,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -28,6 +41,7 @@ pub struct WorkflowArgs {
     //  - Files/Paths
     pub h5ad_file: String,
     pub mi_file: String,
+    pub weights_file: String,
 
     //  - Run Modes
     pub mode: Vec<RunMode>, //
@@ -40,8 +54,6 @@ pub struct WorkflowArgs {
     pub nroundup: usize, // = 4
     #[serde(default = "default_nrounds")]
     pub nrounds: usize, // = 8
-    #[serde(default = "default_nsamples")]
-    pub nsamples: usize, // = 200
     #[serde(default)]
     pub nobs: usize, // = 0
     #[serde(default)]
@@ -49,7 +61,14 @@ pub struct WorkflowArgs {
     #[serde(default)]
     pub npairs: usize, // = 0
 
+    #[serde(default = "default_nbins")]
+    pub nbins: usize,
 
+    #[serde(default = "default_spline_order")]
+    pub spline_order: usize,
+
+    #[serde(default = "default_weights_attr")]
+    pub weights_ds: String,
 }
 
 impl WorkflowArgs {
@@ -63,5 +82,9 @@ impl WorkflowArgs {
         if self.npairs == 0 {
             self.npairs = (self.nvars * (self.nvars - 1)) / 2;
         }
+    }
+
+    pub fn weights_dim(&self) -> usize {
+        self.nbins * self.nobs + 1
     }
 }

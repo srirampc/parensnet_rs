@@ -1,6 +1,4 @@
-use super::{
-    IdVResults, WorkDistributor, WorkflowArgs, collect_samples, pair_indices,
-};
+use super::{IdVResults, WorkflowArgs, collect_samples};
 use crate::{
     comm::CommIfx,
     cond_info,
@@ -10,7 +8,7 @@ use crate::{
         rv::{Error as RVError, MRVTrait},
     },
     types::{PNFloat, PNInteger},
-    util::{RangePair, Vec2d},
+    util::{RangePair, Vec2d, pair_indices, PairWorkDistributor},
 };
 
 use anyhow::{Result, anyhow};
@@ -53,7 +51,7 @@ where
 
 pub struct SampledPUCWorkflow<'a> {
     pub mpi_ifx: &'a CommIfx,
-    pub wdistr: &'a WorkDistributor,
+    pub wdistr: &'a PairWorkDistributor,
     pub args: &'a WorkflowArgs,
 }
 
@@ -172,7 +170,7 @@ impl<'a> SampledPUCWorkflow<'a> {
 
 pub struct LMRPUCWorkflow<'a> {
     pub mpi_ifx: &'a CommIfx,
-    pub wdistr: &'a WorkDistributor,
+    pub wdistr: &'a PairWorkDistributor,
     pub args: &'a WorkflowArgs,
 }
 

@@ -145,12 +145,15 @@ impl AnnData {
         cx: &CommIfx,
     ) -> Result<Array2<T>> {
         if let Some(h5path) = self.row_major_h5.as_ref() {
-            let h5fptr = mpio::open_file(cx, h5path)?;
-            let ds = h5fptr.dataset("X")?;
-            let selection = ndarray::s![cbounds, ..self.nobs];
-            let rdata: Array2<T> =
-                ds.as_reader().indi_read_slice_2d(selection)?;
-            Ok(rdata.t().to_owned())
+            let rdata =
+                mpio::read_range_data_t(h5path, "X", cbounds, 0..self.nobs, cx)?;
+            Ok(rdata)
+            //let h5fptr = mpio::open_file(cx, h5path)?;
+            //let ds = h5fptr.dataset("X")?;
+            //let selection = ndarray::s![cbounds, ..self.nobs];
+            //let rdata: Array2<T> =
+            //    ds.as_reader().indi_read_slice_2d(selection)?;
+            //Ok(rdata.t().to_owned())
         } else {
             cond_debug!(cx.is_root(); "No row file; Switching to default read");
             self.par_read_range_data(cbounds, cx)

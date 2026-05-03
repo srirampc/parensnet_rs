@@ -42,7 +42,7 @@ where
         rank: i32,
     ) -> Result<NodeCollection<SizeT, IntT, FloatT>> {
         let s_timer = SectionTimer::from_comm(wf.comm_ifx().comm(), ",");
-        let columns = wf.wf_dist().var_dist[rank as usize].clone();
+        let columns = wf.wf_dist().vars_dist()[rank as usize].clone();
         wf.io_timer().reset();
         let rdata = wf.ann_data().par_read_range_data_around::<FloatT>(
             columns.clone(),

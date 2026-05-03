@@ -26,6 +26,7 @@ lightgbm3 = { path = "ext/lightgbm3-rs" }
 #lightgbm3 = "1.0.10"
 #lightgbm3-sys = "1.0.8"
 log = "0.4.29"
+mcpnet_rs = { path = "ext/mcpnet_rs" }
 mpi = { version = "0.8.1", features = ["user-operations", "derive"] }
 ndarray = { version = "0.17.1", features = ["serde", "approx"] }
 ndarray-rand = "0.16.0"

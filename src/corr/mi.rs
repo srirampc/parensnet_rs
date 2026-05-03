@@ -1,6 +1,63 @@
 use std::marker::PhantomData;
 
 use crate::types::PNFloat;
+use mcpnet_rs::{bspline_mi_kernel_f32, bspline_weights_f32};
+
+pub fn bspline_weights<FT>(
+    data: &[FT],
+    num_bins: usize,
+    spline_order: usize,
+    num_samples: usize,
+) -> Vec<FT>
+where
+    FT: PNFloat + Default,
+{
+    let mut out_vec: Vec<f32> = vec![0.0; num_bins * num_samples + 1];
+    let in_vec: Vec<f32> = data
+        .iter()
+        .map(|x| x.to_f32().unwrap_or_default())
+        .collect();
+
+    bspline_weights_f32(
+        &in_vec,
+        num_bins as i32,
+        spline_order as i32,
+        num_samples as i32,
+        &mut out_vec,
+    );
+    out_vec
+        .iter()
+        .map(|x| FT::from_f32(*x).unwrap_or_default())
+        .collect()
+}
+
+pub fn bspline_mi<FT>(
+    x_data: &[FT],
+    y_data: &[FT],
+    num_bins: usize,
+    num_samples: usize,
+) -> FT
+where
+    FT: PNFloat + Default,
+{
+    let first: Vec<f32> = x_data
+        .iter()
+        .map(|x| x.to_f32().unwrap_or_default())
+        .collect();
+
+    let second: Vec<f32> = y_data
+        .iter()
+        .map(|x| x.to_f32().unwrap_or_default())
+        .collect();
+
+    FT::from_f32(bspline_mi_kernel_f32(
+        &first,
+        &second,
+        num_bins as i32,
+        num_samples as i32,
+    ))
+    .unwrap_or_default()
+}
 
 fn build_knot_vector<KT>(n_bins: usize, spline_order: usize) -> Vec<KT>
 where

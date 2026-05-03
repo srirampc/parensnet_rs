@@ -97,8 +97,9 @@ pub fn block_read2d_ds<T: H5Type>(
         InterleavedDist::new(h_ds.shape()[0], mcx.size, mcx.rank).range()
     };
 
-    let rdata: ndarray::Array2<T> =
-        h_ds.as_reader().coll_read_slice_2d(ndarray::s![srange, ..])?;
+    let rdata: ndarray::Array2<T> = h_ds
+        .as_reader()
+        .coll_read_slice_2d(ndarray::s![srange, ..])?;
     cond_debug!(mcx.rank == 0 ; "RShape :: {:?} ", rdata.shape());
     Ok(rdata)
 }
@@ -189,4 +190,29 @@ pub fn create_write1d<T: H5Type>(
     let h_group = h_file.create_group(group)?;
     block_write1d(fx_comm, &h_group, dsname, data)?;
     Ok(())
+}
+
+pub fn read_range_data<T: H5Type + Clone>(
+    h5path: &str,
+    ds_name: &str,
+    cbounds: std::ops::Range<usize>,
+    rbounds: std::ops::Range<usize>,
+    cx: &CommIfx,
+) -> Result<ndarray::Array2<T>, hdf5::Error> {
+    let h5fptr = open_file(cx, h5path)?;
+    let ds = h5fptr.dataset(ds_name)?;
+    let selection = ndarray::s![cbounds, rbounds];
+    let rdata: Array2<T> = ds.as_reader().indi_read_slice_2d(selection)?;
+    Ok(rdata)
+}
+
+pub fn read_range_data_t<T: H5Type + Clone>(
+    h5path: &str,
+    ds_name: &str,
+    cbounds: std::ops::Range<usize>,
+    rbounds: std::ops::Range<usize>,
+    cx: &CommIfx,
+) -> Result<ndarray::Array2<T>, hdf5::Error> {
+    let rdata = read_range_data(h5path, ds_name, cbounds, rbounds, cx)?;
+    Ok(rdata.t().to_owned())
 }

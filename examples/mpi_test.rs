@@ -12,8 +12,11 @@ use parensnet_rs::{
             create_file, create_write2d,
         },
     },
-    pucn::{WorkDistributor, collect_samples, generate_samples},
-    util::{Vec2d, block_owner, exc_prefix_sum, triu_pair_to_index},
+    pucn::{collect_samples, generate_samples},
+    util::{
+        PairWorkDistributor, Vec2d, block_owner, exc_prefix_sum,
+        triu_pair_to_index,
+    },
 };
 use serde::{Deserialize, Serialize};
 use std::iter::zip;
@@ -139,7 +142,7 @@ fn test_blocks_2d(
     nvars: usize,
     npairs: usize,
     hist_dim: &Array1<usize>,
-    wdistr: WorkDistributor,
+    wdistr: PairWorkDistributor,
 ) -> Result<()> {
     let blocks2d = wdistr.pairs_2d();
     let nbatches = blocks2d.num_batches();
@@ -282,7 +285,7 @@ fn test_pair_dist(mcx: &CommIfx, args: &InArgs) -> Result<()> {
         nvars,
         npairs,
         &hist_dim,
-        WorkDistributor::new(nvars, npairs, mcx.rank, mcx.size),
+        PairWorkDistributor::new(nvars, npairs, mcx.rank, mcx.size),
     )?;
     mcx.comm().barrier();
     cond_info!(mcx.is_root(); "--");
@@ -291,7 +294,7 @@ fn test_pair_dist(mcx: &CommIfx, args: &InArgs) -> Result<()> {
         nvars,
         npairs,
         &hist_dim,
-        WorkDistributor::new_seq(nvars, npairs, mcx.rank, mcx.size),
+        PairWorkDistributor::new_seq(nvars, npairs, mcx.rank, mcx.size),
     )?;
     Ok(())
 }
