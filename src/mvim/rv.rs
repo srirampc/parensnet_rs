@@ -3,10 +3,8 @@ use ndarray::{Array1, Array2, ArrayView1};
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::{
-    mvim::imeasures::{self, redundancy},
-    types::{PNFloat, PNInteger},
-};
+use crate::types::{PNFloat, PNInteger};
+use super::imeasures::redundancy;
 
 #[derive(Debug)]
 pub enum Error {
@@ -67,19 +65,19 @@ pub trait MRVTrait<IntT: 'static + PNInteger, FloatT: 'static + PNFloat> {
         k: IntT,
     ) -> Result<(FloatT, FloatT, FloatT), Error> {
         Ok((
-            imeasures::redundancy(
+            redundancy(
                 self.get_hist(i)?.view(),
                 self.get_si(i, j)?.view(),
                 self.get_si(i, k)?.view(),
                 Some(self.ndata()),
             ),
-            imeasures::redundancy(
+            redundancy(
                 self.get_hist(j)?.view(),
                 self.get_si(j, i)?.view(),
                 self.get_si(j, k)?.view(),
                 Some(self.ndata()),
             ),
-            imeasures::redundancy(
+            redundancy(
                 self.get_hist(k)?.view(),
                 self.get_si(k, i)?.view(),
                 self.get_si(k, j)?.view(),
@@ -287,7 +285,7 @@ pub trait MRVTrait<IntT: 'static + PNInteger, FloatT: 'static + PNFloat> {
 }
 
 //
-// Struct containing sorted lmr array for a given (about, random state)
+// Struct containing sorted lmr array for a given (about, state of the random variable)
 //
 pub struct UnitLMRSA<IntT, FloatT>
 where

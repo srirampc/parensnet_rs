@@ -20,7 +20,7 @@ use crate::{
     h5::{io, mpio},
     hist::histogram_2d,
     mvim::imeasures::{
-        lmr_about_x_from_lvji, lmr_about_y_from_lvji, log_jvi_ratio,
+        lmr_about_x_from_ljvi, lmr_about_y_from_ljvi, log_jvi_ratio,
         mi_from_ljvi, si_from_ljvi,
     },
     types::{PNFloat, PNInteger},
@@ -115,8 +115,8 @@ where
         let ljvi_ratio =
             log_jvi_ratio(xy_tab.view(), x_hist, y_hist, tbase, nobs);
         let (x_lmr, y_lmr) = (
-            lmr_about_x_from_lvji(ljvi_ratio.view(), xy_tab.view(), Some(nobs)),
-            lmr_about_y_from_lvji(ljvi_ratio.view(), xy_tab.view(), Some(nobs)),
+            lmr_about_x_from_ljvi(ljvi_ratio.view(), xy_tab.view(), Some(nobs)),
+            lmr_about_y_from_ljvi(ljvi_ratio.view(), xy_tab.view(), Some(nobs)),
         );
         let pair = (
             IntT::from_usize(x_idx).unwrap(),

@@ -1,3 +1,23 @@
+//! Functions to compute edges for optimal binning with the Bayesian
+//! blocks algorithm, and routines to construct histograms from a set
+//! of bin edges.
+//!
+//! The module exposes:
+//!
+//! * Plain histogramming primitives — [`histogram_1d`],
+//!   [`histogram_2d`] and [`joint_histogram`] — that bucket data into
+//!   user-supplied bin edges.
+//! * The [`bayesian_blocks_bin_edges`] routine, which selects an
+//!   "optimal" set of bin edges for a 1-D sample using Scargle et al.
+//!   (2012) Bayesian blocks (events / point-measurement form).
+//! * Convenience wrappers [`bb_histogram`] and [`bb_joint_histogram`]
+//!   that combine the two: compute Bayesian-block edges, then bin.
+//! * The [`HSFloat`] marker trait collecting the float bounds used
+//!   throughout the file.
+//!
+//! All of the algorithms operate on `ndarray` views and produce owned
+//! `Array1` / `Array2` outputs.
+
 use ndarray::{Array1, Array2, ArrayView1, s};
 use num::{Float, FromPrimitive, traits::float::TotalOrder};
 use std::clone::Clone;
@@ -6,6 +26,15 @@ use std::fmt::Debug;
 use crate::types::{AddFromZero, AssignOps};
 use crate::util::unique;
 
+/// Marker trait for the float types accepted by histogramming and
+/// Bayesian-block routines in this module.
+///
+/// It bundles together the bounds shared by every public function:
+/// [`Float`] for general arithmetic, [`TotalOrder`] for NaN-safe
+/// comparisons , [`FromPrimitive`] for using `f64` constants,
+/// in-crate [`AssignOps`] (in-place arithmetic) for assign operations .
+/// A blanket implementation provides it for any type satisfying the bounds, so
+/// `f32` and `f64` qualify automatically.
 pub trait HSFloat:
     Float + TotalOrder + FromPrimitive + AssignOps + Debug + Clone
 {
@@ -15,14 +44,39 @@ impl<T: Float + TotalOrder + FromPrimitive + AssignOps + Debug + Clone> HSFloat
 {
 }
 
+/// Map a sample value to the index of the bin that contains it.
+///
+/// `bin_edges` must be sorted in ascending order (with respect to
+/// `TotalOrder`).
+/// With a binary search on `bin_edges`, identify
+/// the index of the half-open bin `[edges[i], edges[i+1])` that the
+/// query `qry_dx` falls into.
+/// Values at or above the last edge map to `bin_edges.len() - 1`.
 fn map_data2bin<T: Float + TotalOrder>(bin_edges: &[T], qry_dx: &T) -> usize {
     let fidx = match bin_edges.binary_search_by(|ex| ex.total_cmp(qry_dx)) {
         Ok(kidx) => kidx,
         Err(eidx) => eidx,
     };
-    if fidx > 0 { fidx - 1 } else { fidx }
+    if fidx > 0 {
+        if fidx <= bin_edges.len() {
+            fidx - 1
+        } else {
+            bin_edges.len() - 1
+        }
+    } else {
+        fidx
+    }
 }
 
+/// Compute a 1-D histogram of `data` using the given bin `edges`.
+///
+/// The histogram has `edges.len() - 1` bins; values that fall above
+/// the last edge are clamped into the final bin (matching NumPy's
+/// `numpy.histogram` behavior on the right edge). `edges` is required
+/// to be sorted in ascending order.
+///
+/// The count type `S` is generic, so callers can request integer or
+/// floating counts as long as `S` implements [`AddFromZero`].
 pub fn histogram_1d<T, S>(data: ArrayView1<T>, edges: &[T]) -> Array1<S>
 where
     T: Float + TotalOrder + Debug,
@@ -31,7 +85,7 @@ where
     let mut hist = Array1::<S>::from_elem(edges.len() - 1, S::zero());
     //let ed_slice = edges.as_slice().unwrap();
     for dx in data {
-        let mut idx =  map_data2bin(edges, dx);
+        let mut idx = map_data2bin(edges, dx);
         if idx >= hist.len() {
             idx = hist.len() - 1;
         }
@@ -40,6 +94,15 @@ where
     hist
 }
 
+/// Compute a 2-D histogram (joint count grid) of paired samples
+/// `(x_data[i], y_data[i])`.
+///
+/// `x_data` and `y_data` are iterated in lock-step (so should have the
+/// same length); each pair is bucketed using the corresponding edge
+/// vectors, and the resulting `(x_bins, y_bins)` count matrix has
+/// shape `(x_bin_edges.len() - 1, y_bin_edges.len() - 1)`. Indices are
+/// clamped to the last bin on either axis. Both edge vectors must be
+/// sorted ascending.
 pub fn histogram_2d<T, S>(
     x_data: ArrayView1<T>,
     x_bin_edges: &[T],
@@ -61,6 +124,15 @@ where
     hist
 }
 
+/// Compute the joint and the two marginal histograms of a paired
+/// sample.
+///
+/// Returns `(joint, x_marginal, y_marginal)` where `joint` is the 2-D
+/// count grid produced by [`histogram_2d`] and the two marginals are
+/// the per-axis counts produced by [`histogram_1d`]. The count type
+/// is the same as the data type `T`, which makes this convenient when
+/// the downstream routines (e.g. mutual information) want floating
+/// counts.
 pub fn joint_histogram<T>(
     x_data: ArrayView1<T>,
     x_bin_edges: &[T],
@@ -77,11 +149,30 @@ where
     )
 }
 
+/// Output of the dynamic-programming step of the Bayesian-blocks
+/// algorithm.
+///
+/// * `_best[k]` — best fitness obtainable for the first `k+1` cells.
+///   Stored for completeness/debugging; the public driver only
+///   consults `last`.
+/// * `last[k]` — index of the optimum change point that ends a block
+///   at cell `k`. The trailing change-point trace is reconstructed by
+///   following these indices backward from `n` to `0`.
 struct OptimumBlocks<T> {
+    /// Best fitness value attainable for prefixes of length `k+1`.
     _best: Array1<T>,
+    /// Optimum predecessor change-point for each prefix.
     last: Array1<usize>,
 }
 
+/// Run the dynamic program algorithm from Scargle et al. (2012) that selects the
+/// optimum partition of point measurements into Bayesian blocks.
+///
+/// For each prefix of length `k` the routine evaluates the log-
+/// likelihood fitness function (Scargle eq. 19) and applies the
+/// `ncp_prior` penalty (eq. 21) before recording the best previous
+/// change point. The returned [`OptimumBlocks`] then drives the
+/// backtrace in [`bayesian_blocks_bin_edges`].
 fn optimal_bayesian_blocks<T>(
     counts: &[T],
     block_sizes: &Array1<T>,
@@ -135,6 +226,23 @@ where
     OptimumBlocks { _best: best, last }
 }
 
+/// Compute the optimal histogram bin edges for `data` using the
+/// Bayesian-blocks algorithm of Scargle et al. (2012).
+///
+/// The procedure is:
+/// 1. Sort `data` and reduce it to its unique values together with
+///    their multiplicities (using [`crate::util::unique`]).
+/// 2. Build a candidate edge vector at the midpoints of consecutive
+///    unique values, with the data extrema as outer edges.
+/// 3. Run the dynamic programming algorithm [`optimal_bayesian_blocks`] to
+///    pick the change points that maximise the Scargle fitness function
+///    with the recommended `p0 = 0.05` prior.
+/// 4. Backtrace the change-point chain and project it onto the
+///    candidate edges to produce the final, ascending-sorted edge
+///    array.
+///
+/// The returned `Array1<T>` is suitable for direct use with
+/// [`histogram_1d`] / [`histogram_2d`].
 pub fn bayesian_blocks_bin_edges<T>(data: ArrayView1<T>) -> Array1<T>
 where
     T: 'static + HSFloat,
@@ -175,6 +283,11 @@ where
     Array1::from_shape_fn(bslice.len(), |ix| edges[bslice[ix]])
 }
 
+/// 1-D Bayesian-blocks histogram.
+///
+/// Calls [`bayesian_blocks_bin_edges`] on `x_data` and feeds the
+/// result to [`histogram_1d`].
+/// Counts are returned in the same float type `T` as the input data.
 pub fn bb_histogram<T>(x_data: ArrayView1<T>) -> Array1<T>
 where
     T: 'static + HSFloat,
@@ -185,6 +298,12 @@ where
     )
 }
 
+/// 2-D Bayesian-blocks joint histogram.
+///
+/// Computes bayesian-block edges independently for `x_data` and
+/// `y_data`, then computes the joint and the two marginal
+/// histograms via [`joint_histogram`]. Returns
+/// `(joint, x_marginal, y_marginal)`.
 pub fn bb_joint_histogram<T>(
     x_data: ArrayView1<T>,
     y_data: ArrayView1<T>,

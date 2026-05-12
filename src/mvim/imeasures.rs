@@ -1,3 +1,33 @@
+//! Information measures over discrete (binned) joint distributions.
+//!
+//! This module turns joint and marginal histograms — typically produced by
+//! [`crate::hist::bb_joint_histogram`] from continuous gene-expression data —
+//! into the mutual-information–based quantities consumed by the network
+//! construction kernels in [`crate::mcpn`], [`crate::pucn`] and
+//! [`crate::mvim::misi`].
+//!
+//! The functions cover three families of measures:
+//!
+//! * **Mutual information (MI)** — [`mi_from_tab`], [`mi_from_ljvi`] and the
+//!   convenience [`mi_from_data_with_bb`] which discretizes raw samples with
+//!   Bayesian-blocks histograms before computing `I(X;Y)`.
+//! * **Specific information (SI)** — [`si_from_tab`] / [`si_from_ljvi`] return
+//!   per-bin contributions of one variable to information about the other and
+//!   feed the [`redundancy`] term used by partial-information decomposition.
+//! * **Log marginal ratios (LMR)** — [`lmr_from_histogram`],
+//!   [`lmr_from_ljvi`], [`lmr_about_x_from_ljvi`] and
+//!   [`lmr_about_y_from_ljvi`] return the per-bin mutual-information density
+//!   summed along one axis of the joint table. "LMR" is local terminology
+//!   (not a standard literature acronym) for these axis-marginalized sums of
+//!   the log-ratio table.
+//!
+//! Helpers [`log_function`], [`log`] and [`log_jvi_ratio`] centralize the
+//! choice of logarithm base via [`LogBase`] and the log-ratio
+//! `log(P(X,Y) / (P(X) P(Y)))` that all of the measures above share.
+//!
+//! All log/ratio helpers replace `NaN` and `±∞` results (produced by zero
+//! marginals or empty bins) with zero so they can be summed safely.
+
 use ndarray::{Array, Array1, Array2, ArrayView, ArrayView1, ArrayView2, Axis};
 use num::traits::float::TotalOrder;
 use num::{Float, FromPrimitive};
@@ -6,9 +36,20 @@ use std::fmt::Debug;
 use crate::hist::bb_joint_histogram;
 use crate::types::{AssignOps, LogBase};
 
+/// Marker trait for floats that can carry information-measure computations.
+///
+/// It bundles the numeric capabilities the routines in this module need:
+/// [`Float`] for log/arithmetic, [`AssignOps`] for in-place ndarray ops,
+/// [`FromPrimitive`] to convert sample counts, and [`Debug`]/[`Clone`] for
+/// diagnostics. Blanket-implemented for any type that satisfies the bounds,
+/// so `f32` and `f64` are valid out of the box.
 pub trait IMFloat: Float + AssignOps + FromPrimitive + Debug + Clone {}
 impl<T: Float + AssignOps + FromPrimitive + Debug + Clone> IMFloat for T {}
 
+/// Return the scalar logarithm function selected by `tbase`.
+///
+/// Used by routines that need to apply the chosen log base inside a closure
+/// (e.g. inside [`log_jvi_ratio`]) without branching on every element.
 pub fn log_function<T: Float>(tbase: LogBase) -> impl Fn(T) -> T {
     match tbase {
         LogBase::Two => T::log2,
@@ -17,6 +58,10 @@ pub fn log_function<T: Float>(tbase: LogBase) -> impl Fn(T) -> T {
     }
 }
 
+/// Element-wise logarithm of an n-dimensional array using the chosen base.
+///
+/// Wraps `ndarray`'s `log2`/`log10`/`ln` so callers do not need to branch
+/// on [`LogBase`] themselves. The output has the same shape as `pdata`.
 pub fn log<T, D>(pdata: ArrayView<T, D>, tbase: LogBase) -> Array<T, D>
 where
     T: 'static + Float,
@@ -29,10 +74,18 @@ where
     }
 }
 
+/// Pointwise log-ratio `log( xy(i,j) * tweight / (x_tab[i] * y_tab[j]) )`.
 ///
-/// Give table for (X,Y), X, and Y
-/// compute the table whose (i, j) entry is log (xy(i,j) * weight / x_i * y_j))
+/// `xy_tab` is the joint histogram of `(X, Y)`, `x_tab` and `y_tab` are the
+/// matching marginals (typically `xy_tab.sum_axis(Axis(1))` and
+/// `xy_tab.sum_axis(Axis(0))`), and `tweight` is the total mass — usually
+/// the sample count `N` so that `xy / N`, `x / N`, `y / N` are probabilities.
 ///
+/// This is the kernel of the mutual-information sum
+/// `I(X;Y) = Σ p(x,y) · log(p(x,y) / (p(x) p(y)))`. Cells with zero marginals
+/// produce `NaN`/`±∞`; those entries are zeroed in place so the table can be
+/// reduced safely by [`mi_from_ljvi`], [`si_from_ljvi`] and the `lmr_*`
+/// helpers.
 pub fn log_jvi_ratio<T>(
     xy_tab: ArrayView2<T>,
     x_tab: ArrayView1<T>,
@@ -56,9 +109,14 @@ where
     jvi_ratio
 }
 
+/// Mutual information `I(X;Y)` from a joint histogram and its marginals.
 ///
-/// Given table for (X,Y), X, and Y; compute mi
-///
+/// `tweight` defaults to `x_tab.sum()` (i.e. the sample count) when
+/// `opt_weight` is `None`. Computed as
+/// `Σ_{i,j} xy_tab[i,j] · log(xy_tab[i,j] · tweight / (x_tab[i] · y_tab[j])) / tweight`,
+/// which equals the textbook MI when the inputs are raw counts. The log base
+/// is selected by `tbase`, so the result is in bits ([`LogBase::Two`]),
+/// nats ([`LogBase::Natural`]) or bans ([`LogBase::Ten`]).
 pub fn mi_from_tab<T>(
     xy_tab: ArrayView2<T>,
     x_tab: ArrayView1<T>,
@@ -75,9 +133,12 @@ where
     mi_prod.sum() / tweight
 }
 
+/// Mutual information from a precomputed log-ratio table.
 ///
-/// Given table for log(P(X,Y)/P(X)P(Y)), compute mi
-///
+/// `ljvi_ratio` is the output of [`log_jvi_ratio`] and must have the same
+/// shape as `xy_tab`. `tweight` defaults to `xy_tab.sum()`. This variant is
+/// preferred when the same `(X,Y)` pair feeds into several measures (MI, SI,
+/// LMR) so the log-ratio table can be computed once and shared.
 pub fn mi_from_ljvi<T>(
     ljvi_ratio: ArrayView2<T>,
     xy_tab: ArrayView2<T>,
@@ -95,9 +156,14 @@ where
     mi_sum / tweight
 }
 
+/// End-to-end mutual information from raw paired samples.
 ///
-/// Given data for X and Y; compute mi
-///
+/// Discretizes `x_data` and `y_data` with [`bb_joint_histogram`]
+/// (Bayesian-blocks edges per axis) and feeds the resulting joint and
+/// marginal tables into [`mi_from_tab`] with `tweight = x_data.len()`.
+/// Convenient for one-off pairs; the network kernels generally cache the
+/// per-variable bin edges and call [`mi_from_tab`] / [`mi_from_ljvi`]
+/// directly to avoid re-binning each variable many times.
 pub fn mi_from_data_with_bb<T>(
     x_data: ArrayView1<T>,
     y_data: ArrayView1<T>,
@@ -116,9 +182,14 @@ where
     )
 }
 
+/// Specific information `(SI_X, SI_Y)` from a precomputed log-ratio table.
 ///
-/// Given table for log(P(X,Y)/P(X)P(Y)), compute (si_x, si_y)
-///
+/// `SI_X[i] = Σ_j (xy[i,j] / x_tab[i]) · ljvi[i,j]` is the contribution of
+/// observing `X = i` to information about `Y` (and symmetrically for `SI_Y`).
+/// The two arrays returned have lengths `x_tab.len()` and `y_tab.len()`
+/// respectively. `NaN`/`±∞` entries (zero marginals) are dropped from the
+/// reductions so the per-bin sums remain finite, matching the convention
+/// used by [`redundancy`].
 pub fn si_from_ljvi<T>(
     ljvi_ratio: ArrayView2<T>,
     xy_tab: ArrayView2<T>,
@@ -153,9 +224,13 @@ where
         }),
     )
 }
+/// Specific information `(SI_X, SI_Y)` directly from histograms.
 ///
-/// Given table for (X,Y), X, and Y, compute (si_x, si_y)
-///
+/// Computes the log-ratio table internally with [`log_jvi_ratio`] and then
+/// delegates to [`si_from_ljvi`]. `tweight` defaults to `x_tab.sum()` and
+/// only affects the global additive constant of the log-ratio (it cancels in
+/// the SI sums). Returns `(SI_X, SI_Y)` of lengths `(x_tab.len(),
+/// y_tab.len())`.
 pub fn si_from_tab<T>(
     xy_tab: ArrayView2<T>,
     x_tab: ArrayView1<T>,
@@ -171,6 +246,15 @@ where
     si_from_ljvi(ljvi_ratio.view(), xy_tab, x_tab, y_tab)
 }
 
+/// Williams–Beer redundancy `R(Z; {X, Y}) = Σ_z p(z) · min(SI_X(z), SI_Y(z))`.
+///
+/// `z_tab` is the marginal histogram over `Z` and `x_si`, `y_si` are the
+/// specific informations of `Z` given `X` and `Y` respectively (i.e. the
+/// `SI_Y`-style outputs of [`si_from_tab`] applied to the `(X,Z)` and
+/// `(Y,Z)` joint tables — see the `redundancy` test for an example).
+/// `opt_weight` divides the running sum to convert raw counts into a
+/// probability average; pass `Some(N)` for a sample count of `N`, or `None`
+/// to leave the result unnormalized.
 pub fn redundancy<T>(
     z_tab: ArrayView1<T>,
     x_si: ArrayView1<T>,
@@ -190,7 +274,14 @@ where
         .fold(T::zero(), |acc, valx| acc + valx)
 }
 
-pub fn lmr_about_x_from_lvji<T>(
+/// Log marginal ratio summed over `Y` for each value of `X`.
+///
+/// Returns a length-`xsize` array whose `i`-th entry is
+/// `Σ_j xy_tab[i,j] · ljvi_ratio[i,j] / tweight` — the per-`X`-bin
+/// contribution to `I(X;Y)`. `tweight` defaults to `xy_tab.sum()` and
+/// rescales counts to probabilities. Panics if `ljvi_ratio` and `xy_tab` do
+/// not share the same shape.
+pub fn lmr_about_x_from_ljvi<T>(
     ljvi_ratio: ArrayView2<T>,
     xy_tab: ArrayView2<T>,
     opt_weight: Option<T>,
@@ -208,8 +299,13 @@ where
     elp_tab.sum_axis(Axis(1))
 }
 
-//
-pub fn lmr_about_y_from_lvji<T>(
+/// Log marginal ratio summed over `X` for each value of `Y`.
+///
+/// Mirror of [`lmr_about_x_from_ljvi`]: returns a length-`ysize` array whose
+/// `j`-th entry is `Σ_i xy_tab[i,j] · ljvi_ratio[i,j] / tweight`. `tweight`
+/// defaults to `xy_tab.sum()`. Panics if `ljvi_ratio` and `xy_tab` do not
+/// share the same shape.
+pub fn lmr_about_y_from_ljvi<T>(
     ljvi_ratio: ArrayView2<T>,
     xy_tab: ArrayView2<T>,
     opt_weight: Option<T>,
@@ -227,7 +323,14 @@ where
     elp_tab.sum_axis(Axis(0))
 }
 
-pub fn lmr_from_lvji<T>(
+/// Compute both LMR projections from a precomputed log-ratio table.
+///
+/// Returns the pair `(lmr_about_y, lmr_about_x)` — i.e. the first array has
+/// length `ysize` ([`lmr_about_y_from_ljvi`]) and the second has length
+/// `xsize` ([`lmr_about_x_from_ljvi`]). Both arrays sum to `I(X;Y)` modulo
+/// the `tweight` normalization (defaulting to `xy_tab.sum()`). Panics if
+/// `ljvi_ratio` and `xy_tab` differ in shape.
+pub fn lmr_from_ljvi<T>(
     ljvi_ratio: ArrayView2<T>,
     xy_tab: ArrayView2<T>,
     opt_weight: Option<T>,
@@ -245,6 +348,13 @@ where
     (elp_tab.sum_axis(Axis(0)), elp_tab.sum_axis(Axis(1)))
 }
 
+/// Compute both LMR projections directly from histograms.
+///
+/// Builds the log-ratio table with [`log_jvi_ratio`] (using `tweight =
+/// xy_tab.sum()` when `opt_weight` is `None`) and forwards to
+/// [`lmr_from_ljvi`]. Returns `(lmr_about_y, lmr_about_x)` of lengths
+/// `(ysize, xsize)`. Panics if the joint and marginal shapes are
+/// inconsistent.
 pub fn lmr_from_histogram<T>(
     xy_tab: ArrayView2<T>,
     x_tab: ArrayView1<T>,
@@ -261,7 +371,7 @@ where
     let tweight = opt_weight.unwrap_or(xy_tab.sum());
     //let tweight = if let Some(twt) = opt_weight { twt } else { x_tab.sum() };
     let ljvi_ratio = log_jvi_ratio(xy_tab, x_tab, y_tab, tbase, tweight);
-    lmr_from_lvji(ljvi_ratio.view(), xy_tab, opt_weight)
+    lmr_from_ljvi(ljvi_ratio.view(), xy_tab, opt_weight)
 }
 
 #[cfg(test)]

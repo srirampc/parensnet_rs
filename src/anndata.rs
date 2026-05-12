@@ -1,3 +1,27 @@
+//! Lightweight interface to [anndata](https://anndata.readthedocs.io)
+//! files.
+//!
+//! Implements just enough of the
+//! [HDF5 file format](https://anndata.readthedocs.io/en/latest/fileformat-prose.html)
+//! used by `anndata` to load the dense observation × variable
+//! expression matrix `X`, the gene name vector under `var/<column>`,
+//! and to support both sequential and parallel-IO (MPI) reads of
+//! column ranges or whole sub-matrices.
+//!
+//! The module exposes two main types:
+//!
+//! * [`AnnData`] — opens an `.h5ad` file, caches the matrix shape and
+//!   the gene-name → column-index lookup, and exposes a family of
+//!   `read_*` / `par_read_*` helpers for both column ranges and
+//!   user-selected sub-matrices.
+//! * [`GeneSetAD`] — borrows an [`AnnData`] and an externally supplied
+//!   subset of genes (from a CSV file or an explicit index list),
+//!   extracts the corresponding expression sub-matrix form HDF5 file and
+//!   provides bidirectional lookups between gene names, original
+//!   AnnData indices, and the columns of that sub-matrix.
+//!
+//! Errors raised by the module are gathered in [`AnnDataError`].
+
 use anyhow::{Ok, Result};
 use hdf5::{
     self, Error as H5Error, File, H5Type,
@@ -16,28 +40,55 @@ use crate::{
     util::{around, read_csv_column},
 };
 
+/// Errors that can be produced while reading an anndata file.
 #[derive(Error, Debug)]
 pub enum AnnDataError {
+    /// Pass-through wrapper around a low-level `hdf5::Error`.
     #[error(transparent)]
     H5(#[from] H5Error),
+    /// The requested input file does not exist on disk.
     #[error("File {0} is missing")]
     MissingFileError(String),
+    /// A gene name (or gene index) that was looked up in the AnnData
+    /// gene-id map could not be found.
     #[error("Gene {0} not found in the dataset")]
     MissingGeneError(String),
+    /// The gene-name column requested from a CSV file is not present
+    /// in its header.
     #[error("Gene Column {0} not found in the csv file")]
     MissingGeneColumnError(String),
 }
 
+/// Light wrapper for anndata.
+///
+/// # Description
+/// Holds the size: number of obervations, variables, gene_ids.
+/// Includes a hashmap for fast identification of gene identifiers from names
+/// Optionally, row major file is present, which enables a fast reading
+/// of the matrix. Row major file enbales faster gene-striped reading of X.
 pub struct AnnData {
+    /// Number of observations (rows of `X`).
     pub nobs: usize,
+    /// Number of variables / genes (columns of `X`).
     pub nvars: usize,
+    /// Number of unordered variable pairs `nvars * (nvars - 1) / 2`,
+    /// pre-computed for downstream pair-wise kernels.
     pub npairs: usize,
+    /// Gene identifiers in the same order as the columns of `X`.
+    /// Empty when no `gene_index_column` was supplied to [`AnnData::new`].
     gene_ids: Vec<String>,
+    /// Reverse lookup `gene name -> column index`.
     gene_id_map: HashMap<String, usize>,
+    /// Path to the column-major (`anndata`) HDF5 file.
     path: String,
+    /// Optional sibling file storing `X` in row-major order. When
+    /// present, the `*_rmajor_*` readers prefer it because column
+    /// ranges then live in contiguous storage and read much faster.
     row_major_h5: Option<String>,
 }
 
+/// Returns the dimension of the 'X' dataset in the input hdf5 file.
+/// Expects that 'X' be a 2D dataset
 pub fn xds_dimensions(ad_fname: &str) -> Result<(usize, usize)> {
     let h5_fptr = hdf5::File::open(ad_fname)?;
     let ds = h5_fptr.dataset("X")?;
@@ -47,6 +98,11 @@ pub fn xds_dimensions(ad_fname: &str) -> Result<(usize, usize)> {
     Ok((nobs, nvars))
 }
 
+/// Returns the gene names stored in the `var/<index_column>` dataset
+/// of an anndata file.
+///
+/// Use variable-length unicode first (`VarLenUnicode`), and
+/// if that fails, falls back to ASCII (`VarLenAscii`).
 pub fn var_gene_names(h5_fptr: &File, index_column: &str) -> Result<Vec<String>> {
     let ds_path = format!("var/{}", index_column);
     let ds = h5_fptr.dataset(ds_path.as_str())?;
@@ -62,6 +118,12 @@ pub fn var_gene_names(h5_fptr: &File, index_column: &str) -> Result<Vec<String>>
     }
 }
 
+/// Returns the gene names and the corresponding gene indices
+///
+/// # Description
+/// Given a HDF5 file object pointing an AnnData file and an 'vars' column
+/// name corresponding to the gene names, returns the gene names
+/// and gene ids.
 pub fn build_gene_index(
     h5_fptr: &File,
     index_column: &str,
@@ -74,6 +136,8 @@ pub fn build_gene_index(
 }
 
 impl AnnData {
+    /// Construct an AnnData object for a given path,  optional gene 
+    /// name column to index with, and optional row major HDF5 file.
     pub fn new(
         path: &str,
         gene_index_column: Option<String>,
@@ -102,36 +166,49 @@ impl AnnData {
         })
     }
 
+    /// Open the underlying HDF5 file for sequential reading.
     fn open_r(&self) -> Result<hdf5::File> {
         let h5fptr = hdf5::File::open(&self.path)?;
         Ok(h5fptr)
     }
 
+    /// Collectively open the underlying HDF5 file with the MPIO
+    /// driver from [`crate::h5::mpio::open_file`].
     fn open_mpio(&self, cx: &CommIfx) -> Result<hdf5::File> {
         let h5fptr = mpio::open_file(cx, &self.path)?;
         Ok(h5fptr)
     }
 
+    /// Borrow the cached `gene name -> column index` map.
     pub fn gene_index_map(&self) -> &HashMap<String, usize> {
         &self.gene_id_map
     }
 
+    /// Borrow the cached gene-identifier vector. Indexed in the same
+    /// order as the columns of `X`.
     pub fn genes_ref(&self) -> &[String] {
         &self.gene_ids
     }
 
+    /// Return the gene identifier in column `i` of `X`.
     pub fn gene_at(&self, i: usize) -> &String {
         &self.gene_ids[i]
     }
 
+    /// Re-read the gene-id column `col_name` from disk (as opposed to
+    /// returning the cached copy stored on the [`AnnData`] instance).
     pub fn read_gene_ids(&self, col_name: &str) -> Result<Vec<String>> {
         var_gene_names(&self.open_r()?, col_name)
     }
 
+    /// Look up a single gene name in the cached map.
     pub fn get_gene_index(&self, gene_id: &str) -> Option<usize> {
         self.gene_id_map.get(gene_id).cloned()
     }
 
+    /// Look up many gene names at once; filters any name
+    /// that is not present in the dataset. Returned indices are
+    /// in the order of the *kept* names from `gene_ids`.
     pub fn get_gene_indices(&self, gene_ids: &[String]) -> Vec<usize> {
         gene_ids
             .iter()
@@ -139,6 +216,12 @@ impl AnnData {
             .collect()
     }
 
+    /// Use MPI parallel IO to block-read a column range from the
+    /// row-major sibling file across all processes.
+    ///
+    /// Uses [`AnnData::row_major_h5`] to read the ranges of columns with 
+    /// [`mpio::read_range_data_t`]. Otherwise, it falls back to
+    /// [`AnnData::par_read_range_data`] on the column-major file.
     pub fn par_rmajor_range_data<T: H5Type + Clone>(
         &self,
         cbounds: Range<usize>,
@@ -148,18 +231,17 @@ impl AnnData {
             let rdata =
                 mpio::read_range_data_t(h5path, "X", cbounds, 0..self.nobs, cx)?;
             Ok(rdata)
-            //let h5fptr = mpio::open_file(cx, h5path)?;
-            //let ds = h5fptr.dataset("X")?;
-            //let selection = ndarray::s![cbounds, ..self.nobs];
-            //let rdata: Array2<T> =
-            //    ds.as_reader().indi_read_slice_2d(selection)?;
-            //Ok(rdata.t().to_owned())
         } else {
             cond_debug!(cx.is_root(); "No row file; Switching to default read");
             self.par_read_range_data(cbounds, cx)
         }
     }
 
+    /// Column-wise parallel block read followed by an [`around`] pass
+    /// that rounds every element to `n_decimals` decimal places.
+    ///
+    /// When `n_decimals == 0` the rounding step is skipped and the
+    /// raw matrix is returned untouched.
     pub fn par_rmajor_read_range_data_around<
         T: H5Type + Float + FromPrimitive,
     >(
@@ -176,6 +258,11 @@ impl AnnData {
         })
     }
 
+    /// Parallel-IO read of the `..self.nobs x cbounds` slice of `X`
+    /// using independent (non-collective) HDF5 selections.
+    ///
+    /// Each rank requests its own column range and the file is opened
+    /// collectively via [`open_mpio`](Self::open_mpio).
     pub fn par_read_range_data<T: H5Type>(
         &self,
         cbounds: Range<usize>,
@@ -188,6 +275,8 @@ impl AnnData {
         Ok(rdata)
     }
 
+    /// Same as [`Self::par_read_range_data`] but rounds the result to
+    /// `n_decimals` decimal places (skipped when `n_decimals == 0`).
     pub fn par_read_range_data_around<T: H5Type + Float + FromPrimitive>(
         &self,
         cbounds: Range<usize>,
@@ -202,6 +291,8 @@ impl AnnData {
         })
     }
 
+    /// Sequentially read the `..self.nobs x cbounds` sub-block of
+    /// `X` from the column-major file.
     pub fn read_range_data<T: H5Type>(
         &self,
         cbounds: Range<usize>,
@@ -212,6 +303,11 @@ impl AnnData {
         Ok(rdata)
     }
 
+    /// Sequentially read the `..self.nobs x cbounds` sub-block of `X`
+    /// preferring the row-major sibling file when available.
+    ///
+    /// Falls back to [`Self::read_range_data`] on the column-major
+    /// file when no row-major sibling has been registered.
     pub fn read_rmajor_range_data<T: H5Type>(
         &self,
         cbounds: Range<usize>,
@@ -228,6 +324,9 @@ impl AnnData {
         }
     }
 
+    /// [`Self::read_range_data`] composed with an [`around`] pass that
+    /// rounds every element to `n_decimals` decimal places (skipped
+    /// when `n_decimals == 0`).
     pub fn read_range_data_around<T: H5Type + Float + FromPrimitive>(
         &self,
         cbounds: Range<usize>,
@@ -241,6 +340,12 @@ impl AnnData {
         })
     }
 
+    /// Read an arbitrary subset of columns of `X` and return them as
+    /// a `nobs x indices.len()` matrix.
+    ///
+    /// Columns are read one at a time and assembled into the output
+    /// in the order given by `indices`. Each `indices[i]` must be a
+    /// valid column of the original `X` dataset.
     pub fn read_submatrix<T: H5Type + Clone + Zero>(
         &self,
         indices: &[usize],
@@ -253,17 +358,13 @@ impl AnnData {
             let rd_col: Array1<T> = ds.read_slice(scolumn)?;
             smat.column_mut(i).assign(&rd_col);
         }
-        // Python Version::
-        //  indexes = np.array(col_indexes)
-        //  indexes_asort = np.argsort(col_indexes)
-        //  indexes_srtd = indexes[indexes_asort]
-        //  submat_srtd: NDFloatArray = hfx["X"][:, indexes_srtd]
-        //  submat = np.zeros(shape=submat_srtd.shape,
-        //                    dtype=submat_srtd.dtype)
-        //  submat[:, indexes_asort] = submat_srtd
+        // TODO:: use the rmajor file, if available
         Ok(smat)
     }
 
+    /// Read the columns named by `gene_ids` and return the resulting
+    /// sub-matrix. Names that are not present in the gene-id map are
+    /// silently dropped (see [`Self::get_gene_indices`]).
     pub fn read_genes_submatrix<T: H5Type + Clone + Zero>(
         &self,
         gene_ids: &[String],
@@ -272,6 +373,7 @@ impl AnnData {
         self.read_submatrix(&indices)
     }
 
+    /// Read a single column `column_index` of `X` as an `Array1`.
     pub fn read_column<T: H5Type>(
         &self,
         column_index: usize,
@@ -282,6 +384,8 @@ impl AnnData {
         Ok(ds.read_slice(ndarray::s![rbounds, column_index])?)
     }
 
+    /// [`Self::read_column`] followed by an [`around`] rounding pass
+    /// to `n_decimals` decimal places (skipped when `n_decimals == 0`).
     pub fn read_column_around<T: H5Type + Float + FromPrimitive>(
         &self,
         column_index: usize,
@@ -298,6 +402,10 @@ impl AnnData {
         })
     }
 
+    /// Look up `gene_name` in the cached map and return the
+    /// corresponding column of `X`. Errors with
+    /// [`AnnDataError::MissingGeneColumnError`] when the name is
+    /// unknown.
     pub fn read_gene_column<T: H5Type>(
         &self,
         gene_name: &str,
@@ -309,17 +417,41 @@ impl AnnData {
     }
 }
 
+/// A pre-loaded subset of an [`AnnData`]'s expression matrix together
+/// with the lookup tables needed to navigate it.
+///
+/// Built either from a CSV file listing the genes of interest
+/// ([`GeneSetAD::new`]) or from an explicit list of column indices
+/// ([`GeneSetAD::from_indices`]). The type stores:
+///
+/// * an owned `nobs x ngenes` expression matrix in
+///   [`expr_matrix`](Self::expr_matrix_ref) order;
+/// * the gene names selected (in the same column order); and
+/// * forward and reverse lookups between gene names, AnnData column
+///   indices, and the local sub-matrix column indices.
+///
+/// An optional `n_decimals` rounds the cached matrix once at load.
 pub struct GeneSetAD<'a, T>
 where
     T: H5Type + Clone + Zero,
 {
+    /// Borrow of the parent [`AnnData`] this gene set was extracted
+    /// from.
     adata: &'a AnnData,
-    genes: Vec<String>, // order of gene names in GeneSetAD
+    /// Gene names in the order they appear in `expr_matrix` columns.
+    genes: Vec<String>,
+    /// AnnData column index for each `genes[i]`; same length as
+    /// `genes`.
     indices: Vec<usize>,
     //pub ad_lookup: HashMap<String, usize>, // gene->location in the AnnData object
-    gene_lookup: HashMap<String, usize>, // gene name ->location in the expr_matrix
-    ad2geneset_map: HashMap<usize, usize>, // location in AnnData -> gene in matrix
+    /// `gene name -> column index in expr_matrix`.
+    gene_lookup: HashMap<String, usize>,
+    /// `AnnData column index -> column index in expr_matrix`.
+    ad2geneset_map: HashMap<usize, usize>,
+    /// Cached expression sub-matrix (`nobs x genes.len()`).
     expr_matrix: Array2<T>,
+    /// Optional decimal-rounding applied to `expr_matrix` at build
+    /// time; `None` means the values were left untouched.
     n_decimals: Option<usize>,
 }
 
@@ -327,6 +459,14 @@ impl<'a, T> GeneSetAD<'a, T>
 where
     T: H5Type + Clone + Zero + Float + FromPrimitive,
 {
+    /// Build a [`GeneSetAD`] from a CSV file of gene names.
+    ///
+    /// `gene_csv` should be a CSV with a header row; `gene_column`
+    /// names the column to read (defaulting to `"gene"`). Names that
+    /// are not present in the parent [`AnnData`] are silently
+    /// dropped. The corresponding columns of `X` are read into a
+    /// dense matrix and rounded to `n_decimals` decimal places when
+    /// supplied.
     pub fn new(
         adata: &'a AnnData,
         gene_csv: &str,
@@ -368,6 +508,11 @@ where
         })
     }
 
+    /// Build a [`GeneSetAD`] from an explicit list of AnnData column
+    /// indices.
+    ///
+    /// Equivalent to [`Self::new`] but skips the CSV/name resolution
+    /// step. The resulting column order matches `tgt_indices`.
     pub fn from_indices(
         adata: &'a AnnData,
         tgt_indices: &[usize],
@@ -401,38 +546,51 @@ where
         })
     }
 
+    /// Number of genes (and therefore columns of `expr_matrix`) in
+    /// this set.
     pub fn len(&self) -> usize {
         self.genes.len()
     }
 
+    /// `true` when no genes were retained by the constructor.
     pub fn is_empty(&self) -> bool {
         self.genes.is_empty()
     }
 
+    /// The decimal-rounding setting captured at build time.
     pub fn decimals(&self) -> Option<usize> {
         self.n_decimals
     }
 
+    /// Borrow the cached expression sub-matrix.
     pub fn expr_matrix_ref(&self) -> &Array2<T> {
         &self.expr_matrix
     }
 
+    /// Borrow the AnnData column indices that back the columns of
+    /// `expr_matrix`.
     pub fn indices_ref(&self) -> &[usize] {
         &self.indices
     }
 
+    /// Borrow the parent [`AnnData`] this set was built from.
     pub fn ann_data(&self) -> &AnnData {
         self.adata
     }
 
+    /// Test membership by gene name.
     pub fn contains_gene(&self, l_gene: &str) -> bool {
         self.gene_lookup.contains_key(l_gene)
     }
 
+    /// Test membership by AnnData column index.
     pub fn contains(&self, gene_idx: usize) -> bool {
         self.ad2geneset_map.contains_key(&gene_idx)
     }
 
+    /// Translate an AnnData column index to its position in the local
+    /// `expr_matrix`. Errors with [`AnnDataError::MissingGeneError`]
+    /// when the index is not part of this set.
     pub fn gene_index(&self, ad_gene_idx: usize) -> Result<usize> {
         let i = self
             .ad2geneset_map
@@ -441,6 +599,8 @@ where
         Ok(*i)
     }
 
+    /// Return the column of `expr_matrix` for `target_gene` (looked
+    /// up by name).
     pub fn column_for(&self, target_gene: &str) -> Result<Array1<T>> {
         let gene_idx = self
             .gene_lookup
@@ -449,6 +609,8 @@ where
         Ok(self.expr_matrix.column(*gene_idx).to_owned())
     }
 
+    /// Return the column of `expr_matrix` corresponding to AnnData
+    /// column index `ad_gene_index`.
     pub fn column(&self, ad_gene_index: usize) -> Result<Array1<T>> {
         let gene_idx = self.ad2geneset_map.get(&ad_gene_index).ok_or(
             AnnDataError::MissingGeneError(format!("{}", ad_gene_index)),
@@ -456,10 +618,17 @@ where
         Ok(self.expr_matrix.column(*gene_idx).to_owned())
     }
 
+    /// Build the leave-one-out sub-matrix that omits the `i`-th
+    /// column of `expr_matrix`.
+    ///
+    /// Used by the network-building kernels to produce the predictor
+    /// matrix for a target gene by dropping that gene's own column.
+    /// Special-cased for `i == 0` and `i == len() - 1` so a single
+    /// contiguous slice can be reused without copying.
     fn expr_matrix_sub_i(&self, i: usize) -> Array2<T> {
         let sub_len = self.len() - 1;
         if 0 < i && i < sub_len {
-            // TODO:: How to do this faster?
+            // TODO:: This step is quite slow. Make this faster.
             let mut smatrix =
                 Array2::<T>::zeros([self.expr_matrix.nrows(), sub_len]);
             for j in 0..i {
@@ -480,6 +649,8 @@ where
         }
     }
 
+    /// Return `expr_matrix` with `target_gene`'s column removed.
+    /// Convenience wrapper around [`Self::expr_matrix_sub_i`].
     pub fn expr_matrix_sub_gene(&self, target_gene: &str) -> Result<Array2<T>> {
         let i = self
             .gene_lookup
@@ -488,6 +659,9 @@ where
         Ok(self.expr_matrix_sub_i(*i))
     }
 
+    /// Return `expr_matrix` with the column for AnnData index
+    /// `ad_gene_idx` removed. Companion to [`Self::expr_matrix_sub_gene`]
+    /// for callers that already hold the integer index.
     pub fn expr_matrix_sub_gene_index(
         &self,
         ad_gene_idx: usize,
