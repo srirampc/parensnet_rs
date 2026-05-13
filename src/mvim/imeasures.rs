@@ -82,10 +82,10 @@ where
 /// the sample count `N` so that `xy / N`, `x / N`, `y / N` are probabilities.
 ///
 /// This is the kernel of the mutual-information sum
-/// `I(X;Y) = Σ p(x,y) · log(p(x,y) / (p(x) p(y)))`. Cells with zero marginals
-/// produce `NaN`/`±∞`; those entries are zeroed in place so the table can be
-/// reduced safely by [`mi_from_ljvi`], [`si_from_ljvi`] and the `lmr_*`
-/// helpers.
+/// `I(X;Y) = Σ p(x,y) · log(p(x,y) / (p(x) p(y)))`. 
+/// Cells with zero marginals produce `NaN`/`±∞`; those entries are zeroed 
+/// in place so the table can be reduced safely 
+/// by [`mi_from_ljvi`], [`si_from_ljvi`] and the `lmr_*` helpers.
 pub fn log_jvi_ratio<T>(
     xy_tab: ArrayView2<T>,
     x_tab: ArrayView1<T>,
@@ -224,6 +224,7 @@ where
         }),
     )
 }
+
 /// Specific information `(SI_X, SI_Y)` directly from histograms.
 ///
 /// Computes the log-ratio table internally with [`log_jvi_ratio`] and then
@@ -274,13 +275,14 @@ where
         .fold(T::zero(), |acc, valx| acc + valx)
 }
 
-/// Log marginal ratio summed over `Y` for each value of `X`.
+/// Log marginal ratio summed over `Y` for each value of `X`. Returns the 
+/// LMR values about each `x ∈ X` by `Y`.
 ///
-/// Returns a length-`xsize` array whose `i`-th entry is
+/// Returns a length-`xdim` array whose `i`-th entry is
 /// `Σ_j xy_tab[i,j] · ljvi_ratio[i,j] / tweight` — the per-`X`-bin
 /// contribution to `I(X;Y)`. `tweight` defaults to `xy_tab.sum()` and
-/// rescales counts to probabilities. Panics if `ljvi_ratio` and `xy_tab` do
-/// not share the same shape.
+/// rescales counts to probabilities. 
+/// Panics if `ljvi_ratio` and `xy_tab` do not share the same shape.
 pub fn lmr_about_x_from_ljvi<T>(
     ljvi_ratio: ArrayView2<T>,
     xy_tab: ArrayView2<T>,
@@ -299,12 +301,13 @@ where
     elp_tab.sum_axis(Axis(1))
 }
 
-/// Log marginal ratio summed over `X` for each value of `Y`.
+/// Log marginal ratio summed over `X` for each value of `Y`. Returns the 
+/// LMR values about each `y ∈ Y` by `X`.
 ///
-/// Mirror of [`lmr_about_x_from_ljvi`]: returns a length-`ysize` array whose
+/// Mirror of [`lmr_about_x_from_ljvi`]: returns a length-`ydim` array whose
 /// `j`-th entry is `Σ_i xy_tab[i,j] · ljvi_ratio[i,j] / tweight`. `tweight`
-/// defaults to `xy_tab.sum()`. Panics if `ljvi_ratio` and `xy_tab` do not
-/// share the same shape.
+/// defaults to `xy_tab.sum()`. 
+/// Panics if `ljvi_ratio` and `xy_tab` do not share the same shape.
 pub fn lmr_about_y_from_ljvi<T>(
     ljvi_ratio: ArrayView2<T>,
     xy_tab: ArrayView2<T>,
@@ -323,11 +326,12 @@ where
     elp_tab.sum_axis(Axis(0))
 }
 
-/// Compute both LMR projections from a precomputed log-ratio table.
+/// Compute both LMR arrays (about Y, and about X) from a precomputed 
+/// log-ratio table.
 ///
 /// Returns the pair `(lmr_about_y, lmr_about_x)` — i.e. the first array has
-/// length `ysize` ([`lmr_about_y_from_ljvi`]) and the second has length
-/// `xsize` ([`lmr_about_x_from_ljvi`]). Both arrays sum to `I(X;Y)` modulo
+/// length `ydim` ([`lmr_about_y_from_ljvi`]) and the second has length
+/// `xdim` ([`lmr_about_x_from_ljvi`]). Both arrays sum to `I(X;Y)` modulo
 /// the `tweight` normalization (defaulting to `xy_tab.sum()`). Panics if
 /// `ljvi_ratio` and `xy_tab` differ in shape.
 pub fn lmr_from_ljvi<T>(
@@ -348,12 +352,12 @@ where
     (elp_tab.sum_axis(Axis(0)), elp_tab.sum_axis(Axis(1)))
 }
 
-/// Compute both LMR projections directly from histograms.
+/// Compute both LMR arrays (about Y, and about X) directly from histograms.
 ///
 /// Builds the log-ratio table with [`log_jvi_ratio`] (using `tweight =
 /// xy_tab.sum()` when `opt_weight` is `None`) and forwards to
 /// [`lmr_from_ljvi`]. Returns `(lmr_about_y, lmr_about_x)` of lengths
-/// `(ysize, xsize)`. Panics if the joint and marginal shapes are
+/// `(ydim, xdim)`. Panics if the joint and marginal shapes are
 /// inconsistent.
 pub fn lmr_from_histogram<T>(
     xy_tab: ArrayView2<T>,
@@ -365,11 +369,10 @@ pub fn lmr_from_histogram<T>(
 where
     T: 'static + IMFloat,
 {
-    let (xsize, ysize) = xy_tab.dim();
-    assert_eq!((xsize, ysize), (x_tab.len(), y_tab.len()));
+    let (xdim, ydim) = xy_tab.dim();
+    assert_eq!((xdim, ydim), (x_tab.len(), y_tab.len()));
     //
     let tweight = opt_weight.unwrap_or(xy_tab.sum());
-    //let tweight = if let Some(twt) = opt_weight { twt } else { x_tab.sum() };
     let ljvi_ratio = log_jvi_ratio(xy_tab, x_tab, y_tab, tbase, tweight);
     lmr_from_ljvi(ljvi_ratio.view(), xy_tab, opt_weight)
 }

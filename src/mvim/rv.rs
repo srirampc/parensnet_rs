@@ -1,16 +1,55 @@
+//! Random-variable description trait and fast lookup tables for redundancy /
+//! PUC computations.
+//!
+//! This module sits between the raw histogram/log-ratio tables computed in
+//! [`crate::mvim::imeasures`] and the network-construction kernels in
+//! [`crate::mcpn`] / [`crate::pucn`]. It defines:
+//!
+//! * [`MRVTrait`] — the abstract view of a discrete multi-variable
+//!   distribution. Implementors expose per-variable histograms, marginal
+//!   dimensions, mutual information `I(X_i; X_j)`, specific information `SI`
+//!   and log-marginal-ratio (LMR) vectors. Default trait methods build on
+//!   those primitives to compute Williams–Beer-style [`redundancy`]
+//!   contributions and the PUC score introduced by Chan et al., 2017
+//!   ("Gene Regulatory Network Inference from Single-Cell Data Using
+//!   Multivariate Information Measures", Cell Systems 5(3)).
+//! * [`UnitLMRSA`] — a single sorted/prefix-sum/rank record for one
+//!   `(about, rstate)` pair, useful for ad-hoc per-state queries.
+//! * [`LMRSA`] — the full table of [`UnitLMRSA`]-style records concatenated
+//!   along the `dim` (state) axis, for every `by` variable. The sorted +
+//!   prefix-sum + inverse-rank encoding lets [`LMRSA::minsum_wsrc`] /
+//!   [`LMRSA::minsum_nosrc`] evaluate `Σ_state min(LMR(about,by_a)(state),
+//!   LMR(about,by_b)(state))` in O(dim) per pair, instead of a O(dim · nvars)
+//!   linear scan.
+//! * [`LMRDataStructure`] / [`LMRSubsetDataStructure`] — thin wrappers around
+//!   an [`LMRSA`] tied to a fixed `about` variable. The first version covers
+//!   every variable in the distribution; the second restricts to a subset
+//!   tracked by a `subset_map` and falls back to a binary search for any
+//!   query whose source variable is outside the subset. Both are consumed by
+//!   [`crate::mvim::misi::MISIRangePair`] and [`crate::mvim::misi::MISIPair`]
+//!   to compute PUC several times faster than the generic trait method.
+
 use itertools::Itertools;
 use ndarray::{Array1, Array2, ArrayView1};
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use crate::types::{PNFloat, PNInteger};
 use super::imeasures::redundancy;
+use crate::types::{PNFloat, PNInteger};
 
+/// Errors returned by [`MRVTrait`] queries and the LMR data-structure
+/// constructors.
 #[derive(Debug)]
 pub enum Error {
+    /// A variable identifier (`i`/`j`/`k`) is not in the implementor's range.
     InvalidIndex(usize),
+    /// The `about` argument passed to a histogram / SI / LMR query is unknown.
     InvalidAbout(usize),
+    /// The `by` argument paired with `about` is unknown.
     InvalidBy(usize),
+    /// Catch-all for invariants that should not be reachable in practice
+    /// (e.g. an [`crate::mvim::misi::LMRDSPair`] queried before
+    /// `set_lmr_ds`).
     Unexpected(&'static str),
 }
 
@@ -35,29 +74,80 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+/// Abstract view of a discrete multi-variable distribution.
+///
+/// Implementors describe `nvariables()` random variables observed over
+/// `nobservations()` samples. Each variable `i` is identified by an
+/// `IntT`-typed index (`0..nvariables()`) and is summarized by a marginal
+/// histogram (`get_hist`, `get_hist_dim`), pairwise mutual information
+/// (`get_mi`), and the per-`(about, by)` specific information / log-marginal
+/// ratio (LMR) vectors (`get_si`/`si_value`, `get_lmr`/`lmr_value`).
+///
+/// Default methods build redundancy and PUC quantities on top of the
+/// primitives above:
+///
+/// * [`get_redundancies`](MRVTrait::get_redundancies) — Williams–Beer
+///   redundancy contributions for each ordering of a triple `(i, j, k)`.
+/// * [`mpuc`](MRVTrait::mpuc),
+///   [`redundancy_updates`](MRVTrait::redundancy_updates),
+///   [`accumulate_redundancies`](MRVTrait::accumulate_redundancies) — the
+///   PUC computation defined by Chan et al. 2017 used by [`crate::pucn`].
+/// * [`compute_puc_matrix`](MRVTrait::compute_puc_matrix) and
+///   [`compute_puc_matrix_for`](MRVTrait::compute_puc_matrix_for) — assemble
+///   a dense `nvars × nvars` PUC adjacency matrix.
+/// * [`compute_lm_puc`](MRVTrait::compute_lm_puc) — the LMR-based PUC form
+///   `(nvars-2 - minsum(i,j)/I(i,j)) + (nvars-2 - minsum(j,i)/I(i,j))`,
+///   which equals the Chan et al. PUC sum but is computed via the
+///   sorted/prefix-sum [`LMRSA`] tables in O(dim) instead of O(dim · nvars).
+///
+/// All `get_*` accessors return data wrapped in [`Result`] so implementors
+/// can validate indices and raise [`Error::InvalidIndex`] /
+/// [`Error::InvalidAbout`] / [`Error::InvalidBy`].
 pub trait MRVTrait<IntT: 'static + PNInteger, FloatT: 'static + PNFloat> {
+    /// Marginal histogram of variable `i`, length `get_hist_dim(i)`.
     fn get_hist(&self, i: IntT) -> Result<Array1<FloatT>, Error>;
+    /// Number of histogram bins (`dim`) for variable `i`.
     fn get_hist_dim(&self, i: IntT) -> Result<IntT, Error>;
+    /// Pairwise mutual information `I(X_i; X_j)` (symmetric).
     fn get_mi(&self, i: IntT, j: IntT) -> Result<FloatT, Error>;
+    /// Specific information vector `SI_about[·]` of length
+    /// `get_hist_dim(about)` describing what knowing each value of `by`
+    /// reveals about `about`.
     fn get_si(&self, about: IntT, by: IntT) -> Result<Array1<FloatT>, Error>;
+    /// Single entry of [`get_si`](MRVTrait::get_si) at state `rstate`.
     fn si_value(
         &self,
         about: IntT,
         by: IntT,
         rstate: IntT,
     ) -> Result<FloatT, Error>;
+    /// Log-marginal-ratio vector `LMR_about[·]` of length
+    /// `get_hist_dim(about)` (the `lmr_about_x_from_ljvi` projection of
+    /// the joint log-ratio table; see [`crate::mvim::imeasures`]).
     fn get_lmr(&self, i: IntT, j: IntT) -> Result<Array1<FloatT>, Error>;
+    /// Single entry of [`get_lmr`](MRVTrait::get_lmr) at state `rstate`.
     fn lmr_value(
         &self,
         about: IntT,
         by: IntT,
         rstate: IntT,
     ) -> Result<FloatT, Error>;
+    /// Sample count `N` returned as `FloatT`, used as the probability
+    /// normalization in redundancy/PUC sums.
     fn ndata(&self) -> FloatT;
+    /// Number of observations `N` (the sample dimension).
     fn nobservations(&self) -> usize;
+    /// Number of random variables in the distribution.
     fn nvariables(&self) -> usize;
 
-    //
+    /// Williams–Beer redundancy contributions of every ordering of the
+    /// triple `(i, j, k)`.
+    ///
+    /// Returns the tuple `(R_i, R_j, R_k)` where `R_x = redundancy(hist_x,
+    /// SI(x|y), SI(x|z), Some(N))` for the cyclic permutations
+    /// `(x, y, z) ∈ {(i,j,k), (j,i,k), (k,i,j)}`. Used by
+    /// [`redundancy_updates`](MRVTrait::redundancy_updates) to feed the PUC
+    /// scoring kernel.
     fn get_redundancies(
         &self,
         i: IntT,
@@ -86,7 +176,11 @@ pub trait MRVTrait<IntT: 'static + PNInteger, FloatT: 'static + PNFloat> {
         ))
     }
 
-    //
+    /// Per-pair PUC contribution `mPUC(i, j; redundancy)`.
+    ///
+    /// Defined as `(I(X_i;X_j) - R) / I(X_i;X_j)` and clamped to `[0, ∞)`.
+    /// Negative or non-finite values (e.g. when `I(X_i;X_j) = 0`) are
+    /// reported as zero so they do not subtract from accumulated PUC scores.
     fn mpuc(
         &self,
         i: IntT,
@@ -102,7 +196,13 @@ pub trait MRVTrait<IntT: 'static + PNInteger, FloatT: 'static + PNFloat> {
         }
     }
 
-    //
+    /// Three PUC updates produced by a single triple `(i, j, k)`.
+    ///
+    /// Returns `(Δij, Δik, Δjk)` — the PUC contributions to the edges
+    /// `(i,j)`, `(i,k)` and `(j,k)` respectively, each computed from the
+    /// pair of redundancies attributable to that edge. Requires `i < j`.
+    /// Used by [`compute_puc_matrix`](MRVTrait::compute_puc_matrix) to
+    /// build the dense PUC adjacency matrix one combination at a time.
     fn redundancy_updates(
         &self,
         i: IntT,
@@ -118,7 +218,15 @@ pub trait MRVTrait<IntT: 'static + PNInteger, FloatT: 'static + PNFloat> {
         ))
     }
 
-    //
+    /// PUC contribution to the edge `(i, j)` from a single conditioning
+    /// variable `by`.
+    ///
+    /// Computes `mpuc(i, j, R_i) + mpuc(i, j, R_j)` where `R_i` and `R_j`
+    /// are the Williams–Beer redundancies of `(i, by)` and `(j, by)` against
+    /// each other (the third "leg" of the PUC triple is fixed at `by`).
+    /// Asserts `i < j` and `i != by != j` — callers in
+    /// [`accumulate_redundancies_for`](MRVTrait::accumulate_redundancies_for)
+    /// already filter out the trivial cases.
     fn redundancy_update_for(
         &self,
         i: IntT,
@@ -145,7 +253,13 @@ pub trait MRVTrait<IntT: 'static + PNInteger, FloatT: 'static + PNFloat> {
         Ok(self.mpuc(i, j, ri)? + self.mpuc(i, j, rj)?)
     }
 
-    //
+    /// Sum of [`redundancy_update_for`](MRVTrait::redundancy_update_for)
+    /// across an explicit set of conditioning variables `by_nodes`.
+    ///
+    /// Skips any `bx == i` or `bx == j` so the caller may pass a list that
+    /// contains the edge endpoints. Used by
+    /// [`compute_puc_matrix_for`](MRVTrait::compute_puc_matrix_for) to
+    /// restrict PUC accumulation to a subset of the genome.
     fn accumulate_redundancies_for(
         &self,
         i: IntT,
@@ -162,6 +276,11 @@ pub trait MRVTrait<IntT: 'static + PNInteger, FloatT: 'static + PNFloat> {
         Ok(acc)
     }
 
+    /// PUC accumulation against every variable `0..nvariables()`.
+    ///
+    /// Convenience wrapper over
+    /// [`accumulate_redundancies_for`](MRVTrait::accumulate_redundancies_for)
+    /// with the full variable range as `by_nodes`.
     fn accumulate_redundancies(&self, i: IntT, j: IntT) -> Result<FloatT, Error> {
         let nvars: usize = self.nvariables();
         let vrange: Vec<IntT> =
@@ -169,7 +288,12 @@ pub trait MRVTrait<IntT: 'static + PNInteger, FloatT: 'static + PNFloat> {
         self.accumulate_redundancies_for(i, j, &vrange)
     }
 
-    //
+    /// Build the dense `nvars × nvars` PUC adjacency matrix.
+    ///
+    /// Iterates over all `C(nvars, 3)` triples and accumulates each triple's
+    /// contribution into the upper triangle via
+    /// [`redundancy_updates`](MRVTrait::redundancy_updates), then mirrors
+    /// the upper triangle into the lower triangle. The diagonal stays zero.
     fn compute_puc_matrix(&self) -> Result<Array2<FloatT>, Error> {
         let nvars = self.nvariables();
         let mut puc_network: Array2<FloatT> = Array2::zeros((nvars, nvars));
@@ -195,7 +319,13 @@ pub trait MRVTrait<IntT: 'static + PNInteger, FloatT: 'static + PNFloat> {
         Ok(puc_network)
     }
 
-    //
+    /// Subset variant of
+    /// [`compute_puc_matrix`](MRVTrait::compute_puc_matrix).
+    ///
+    /// Each upper-triangular entry `(i, j)` is filled with
+    /// `accumulate_redundancies_for(i, j, by_nodes)`. The lower triangle
+    /// stays zero (no symmetric mirroring), since callers typically only
+    /// consume the upper triangle when restricting to a subset.
     fn compute_puc_matrix_for(
         &self,
         by_nodes: &[IntT],
@@ -214,7 +344,14 @@ pub trait MRVTrait<IntT: 'static + PNInteger, FloatT: 'static + PNFloat> {
         Ok(puc_network)
     }
 
-    //
+    /// Dump every per-triple redundancy into a hashmap keyed by ordered
+    /// triple.
+    ///
+    /// For each combination `i < j < k` the three values from
+    /// [`redundancy_updates`](MRVTrait::redundancy_updates) are inserted
+    /// under the keys `(i, j, k)`, `(i, k, j)` and `(k, j, i)` respectively.
+    /// Mainly useful for diagnostic dumps; `compute_puc_matrix*` is the
+    /// production path. Returns an empty map when `nvariables() == 0`.
     fn compute_redundancies(
         &self,
     ) -> Result<HashMap<(i32, i32, i32), FloatT>, Error> {
@@ -239,6 +376,15 @@ pub trait MRVTrait<IntT: 'static + PNInteger, FloatT: 'static + PNFloat> {
         Ok(hsmap)
     }
 
+    /// Per-`by` vector of `Σ_state min(LMR(about, target)(s), LMR(about,
+    /// by)(s))`.
+    ///
+    /// Iterates over every variable except `about` and `target`, computing
+    /// for each candidate `by` the elementwise minimum between
+    /// `LMR(about, target)` and `LMR(about, by)` and summing across states.
+    /// This function implementation takes O(nvars · dim) ; 
+    /// [`LMRSA::minsum_wsrc`] / [`LMRSA::minsum_nosrc`] implements the 
+    /// O(dim) variant.
     fn minsum_list(
         &self,
         about: IntT,
@@ -260,10 +406,19 @@ pub trait MRVTrait<IntT: 'static + PNInteger, FloatT: 'static + PNFloat> {
         Ok(ms_list)
     }
 
+    /// Compute sum:
+    ///  `Σ_by Σ_state min(LMR(about, target)(s), LMR(about, by)(s))`
+    /// i.e., scalar reduction of [`minsum_list`](MRVTrait::minsum_list).
     fn get_lmr_minsum(&self, about: IntT, target: IntT) -> Result<FloatT, Error> {
         Ok(self.minsum_list(about, target)?.sum())
     }
 
+    /// Scaling factor in front of `minsum / I(about, target)` inside
+    /// [`compute_lm_puc`](MRVTrait::compute_lm_puc).
+    ///
+    /// Defaults to `nvariables() - 2` (one position per non-(about/target)
+    /// variable). Subset-aware implementors override this to restrict 
+    /// to only those that are part of the active subset.
     fn get_puc_factor(
         &self,
         _about: IntT,
@@ -272,6 +427,14 @@ pub trait MRVTrait<IntT: 'static + PNInteger, FloatT: 'static + PNFloat> {
         Ok(FloatT::from_usize(self.nvariables() - 2).unwrap())
     }
 
+    /// LMR-based PUC score for the edge `(i, j)`.
+    ///
+    /// Equal to
+    /// `(P(i,j) - minsum(i,j)/I(i,j)) + (P(j,i) - minsum(j,i)/I(i,j))`,
+    /// where `P` is [`get_puc_factor`](MRVTrait::get_puc_factor) and
+    /// `minsum` is [`get_lmr_minsum`](MRVTrait::get_lmr_minsum). Returns
+    /// `I(i,j)` directly when it is non-positive (so the edge contributes a
+    /// non-positive but finite value rather than dividing by zero).
     fn compute_lm_puc(&self, i: IntT, j: IntT) -> Result<FloatT, Error> {
         let mij = self.get_mi(i, j)?;
         if mij <= FloatT::zero() {
@@ -284,18 +447,35 @@ pub trait MRVTrait<IntT: 'static + PNInteger, FloatT: 'static + PNFloat> {
     }
 }
 
-//
-// Struct containing sorted lmr array for a given (about, state of the random variable)
-//
+/// Sorted/prefix-sum/rank record for the LMR vector of a single
+/// `(about, rstate)` pair.
+///
+/// Stores the LMR values of every "by" variable at one fixed state of
+/// `about`. All three arrays have length `nvars` (the total number of
+/// variables in the distribution):
+///
+/// * `sorted`  — the LMR values sorted in ascending order.
+/// * `pfxsum`  — the inclusive prefix sum of `sorted`.
+/// * `rank[i]` — the position of variable `i` inside `sorted`.
+///
+/// Together they let [`minsum_wsrc`](Self::minsum_wsrc) split
+/// `Σ_by min(LMR_target, LMR_by)` into "values below the cutoff" (looked up
+/// via `pfxsum`) and "values clamped to the cutoff" (counted via the rank)
+/// in O(1).
 pub struct UnitLMRSA<IntT, FloatT>
 where
     IntT: 'static + PNInteger,
     FloatT: 'static + PNFloat,
 {
+    /// `about` variable identifier this record belongs to.
     pub about: IntT,
+    /// State of `about` this record is fixed at.
     pub rstate: IntT,
+    /// LMR values sorted ascending; length `nvars`.
     sorted: Array1<FloatT>,
+    /// Inclusive prefix sum of `sorted`.
     pfxsum: Array1<FloatT>,
+    /// Inverse lookup: `rank[v]` is the position of variable `v` in `sorted`.
     rank: Array1<IntT>,
 }
 
@@ -304,6 +484,11 @@ where
     IntT: 'static + PNInteger,
     FloatT: 'static + PNFloat,
 {
+    /// Build a [`UnitLMRSA`] from the raw LMR slice for `(about, rstate)`.
+    ///
+    /// `lmr[i]` is the LMR value of the candidate "by" variable `i`. The
+    /// constructor sorts the slice, builds the prefix sum, and inverts the
+    /// permutation to populate `rank` so subsequent queries are O(1).
     pub fn from_slice(about: IntT, rstate: IntT, lmr: &[FloatT]) -> Self {
         let nvars = lmr.len();
 
@@ -337,6 +522,13 @@ where
         }
     }
 
+    /// O(1) computation of `Σ_{by ≠ src} min(LMR_src, LMR_by)` for this
+    /// `(about, rstate)`.
+    ///
+    /// Splits the sum at the rank of `src_idx` in [`sorted`](Self::sorted):
+    /// every value strictly below `LMR(src)` contributes itself (read off
+    /// `pfxsum`), and every value at or above contributes `LMR(src)` itself
+    /// (counted by `nvars - 1 - rank`).
     pub fn minsum_wsrc(&self, src_idx: usize) -> FloatT {
         let mut rdsum = FloatT::zero();
         let lmrank = self.rank[src_idx].to_usize().unwrap();
@@ -353,19 +545,47 @@ where
     }
 }
 
-//
-// Struct containing sorted lmr arrays for a given about
-//
+/// Sorted/prefix-sum/rank tables for the LMR vectors of a single `about`
+/// variable across every state.
+///
+/// Conceptually a stack of `dim` [`UnitLMRSA`]s, one per state of `about`,
+/// flattened into three `dim · nvars`-long buffers and indexed by
+/// `rstate · nvars + position`. `dim` is the number of histogram bins of
+/// `about` and `nvars` is the number of "by" variables tracked by the
+/// table (either every variable in the distribution or a fixed subset).
+///
+/// * `sorted[rstate · nvars + ix]` — LMR values for state `rstate` sorted
+///   ascending.
+/// * `pfxsum[rstate · nvars + ix]` — inclusive prefix sum of `sorted`
+///   within the same state segment.
+/// * `rank[rstate · nvars + v]` — position of variable `v` in
+///   the sorted segment for state `rstate`.
+///
+/// The two query methods produce the per-state minsum used by PUC computation:
+///
+/// * [`minsum_wsrc`](Self::minsum_wsrc) — when the source variable is one
+///   of the tracked variables, look up its rank and split the sum in O(1)
+///   per state.
+/// * [`minsum_nosrc`](Self::minsum_nosrc) — when the source LMR vector is
+///   not in the table, binary-search each state to find the cutoff and
+///   apply the same prefix-sum trick.
 pub struct LMRSA<IntT, FloatT>
 where
     IntT: 'static + PNInteger,
     FloatT: 'static + PNFloat,
 {
+    /// Total length of each flat buffer (`dim * nvars`); kept for symmetry
+    /// with the constructor and currently unused at query time.
     _size: usize,
+    /// Number of "by" variables tracked.
     nvars: usize,
+    /// Number of states of `about`.
     dim: usize,
+    /// `sorted` segments concatenated across states.
     sorted: Array1<FloatT>,
+    /// `pfxsum` segments concatenated across states.
     pfxsum: Array1<FloatT>,
+    /// `rank` segments concatenated across states.
     rank: Array1<IntT>,
 }
 
@@ -375,6 +595,12 @@ where
     FloatT: 'static + PNFloat,
 {
     #![allow(clippy::needless_range_loop)]
+    /// Build the full-distribution [`LMRSA`] for a given `about` variable.
+    ///
+    /// Calls `pidata.get_lmr(about, by)` for every `by ∈ 0..nvariables()`
+    /// and packs the values into `siv_lst[rstate][vidx]` before delegating
+    /// the sort/prefix-sum/rank construction to
+    /// [`from_siv_list`](Self::from_siv_list).
     pub fn from_mrv_trait(
         pidata: &impl MRVTrait<IntT, FloatT>,
         about: IntT,
@@ -395,6 +621,13 @@ where
         Self::from_siv_list(&mut siv_lst, size, nvars, dim)
     }
 
+    /// Sort each per-state vector and assemble the segmented `sorted`,
+    /// `pfxsum` and `rank` arrays.
+    ///
+    /// `siv_list[rstate]` is the unsorted vector of `(lmr_value, by_var)`
+    /// pairs for state `rstate`. The function sorts each entry in place,
+    /// then walks it once to populate the three flat buffers used by
+    /// [`minsum_wsrc`](Self::minsum_wsrc) / [`minsum_nosrc`](Self::minsum_nosrc).
     pub fn from_siv_list(
         siv_list: &mut [Vec<(FloatT, IntT)>],
         size: usize,
@@ -429,6 +662,12 @@ where
         })
     }
 
+    /// Build an [`LMRSA`] directly from a flat LMR buffer.
+    ///
+    /// `lmr` is laid out as `nvars` consecutive segments of length `dim`,
+    /// where segment `vidx` holds the LMR vector `LMR(about, vidx)`. Used
+    /// by callers that already loaded the LMR table from disk and need to
+    /// reorganize it for fast minsum queries.
     pub fn from_lmr_slice(
         dim: IntT,
         nvars: usize,
@@ -450,6 +689,14 @@ where
         Self::from_siv_list(&mut siv_lst, size, nvars, dim)
     }
 
+    /// Build a subset-restricted [`LMRSA`] for `about`.
+    ///
+    /// `subset_map` maps each external variable id to its position in the
+    /// per-state vectors (so `subset_map.len() == nvars`). For every entry
+    /// the constructor pulls `LMR(about, by_var)` from `pidata`, sorts each
+    /// state's segment, and records the inverse permutation back into the
+    /// subset positions so [`minsum_wsrc`](Self::minsum_wsrc) can later
+    /// look up by the subset's local index.
     pub fn from_subset_map(
         pidata: &impl MRVTrait<IntT, FloatT>,
         about: IntT,
@@ -494,6 +741,12 @@ where
         })
     }
 
+    /// O(dim) minsum when the source variable is part of the table.
+    ///
+    /// Sums the per-state contribution of [`UnitLMRSA::minsum_wsrc`] across
+    /// every state of `about`. `src_idx` is the position of the source
+    /// variable inside the table (subset-local index for subset-built
+    /// tables).
     pub fn minsum_wsrc(&self, src_idx: usize) -> FloatT {
         let mut rdsum = FloatT::zero();
         for rstate in 0..self.dim {
@@ -512,6 +765,16 @@ where
         rdsum
     }
 
+    /// O(dim · log nvars) minsum when the source LMR vector is not in the
+    /// table.
+    ///
+    /// `lmd` is the externally supplied `LMR(about, src)` vector of length
+    /// `dim`. For each state the function binary-searches the sorted
+    /// segment to find where `lmd[rstate]` would be inserted, then applies
+    /// the same prefix-sum / "tail count" decomposition as
+    /// [`minsum_wsrc`](Self::minsum_wsrc). Used by
+    /// [`LMRSubsetDataStructure::minsum`] when the requested source is
+    /// outside the active subset.
     pub fn minsum_nosrc(&self, lmd: ArrayView1<FloatT>) -> FloatT {
         assert!(lmd.len() == self.dim);
         let mut rdsum = FloatT::zero();
@@ -540,13 +803,23 @@ where
     }
 }
 
+/// Wrapper bundling an [`LMRSA`] with the `about` variable it was built
+/// for, sized for the entire variable set.
+///
+/// Consumed by [`crate::mvim::misi::MISIRangePair`] and
+/// [`crate::mvim::misi::MISIPair`] to compute PUC orders of magnitude faster
+/// than [`MRVTrait::compute_lm_puc`]'s default linear scan.
 pub struct LMRDataStructure<IntT, FloatT>
 where
     IntT: 'static + PNInteger,
     FloatT: 'static + PNFloat,
 {
+    /// Variable this table is centered on; arguments to [`minsum`] are
+    /// interpreted as `LMR(about, src_var)`.
     about: IntT,
+    /// Total number of variables in the underlying distribution.
     nvars: usize,
+    /// Sorted/prefix-sum/rank tables, one segment per state of `about`.
     lmr: LMRSA<IntT, FloatT>,
 }
 
@@ -555,6 +828,8 @@ where
     IntT: 'static + PNInteger,
     FloatT: 'static + PNFloat,
 {
+    /// Build an [`LMRDataStructure`] for `about` covering every variable
+    /// in `pidata`.
     pub fn new(
         pidata: &impl MRVTrait<IntT, FloatT>,
         about: IntT,
@@ -566,27 +841,49 @@ where
         })
     }
 
+    /// `about` variable this table was built for.
     pub fn get_about(&self) -> IntT {
         self.about
     }
 
+    /// PUC scaling factor `nvars - 2` — the count of "by" variables that
+    /// can sit between an edge's two endpoints in the full distribution.
+    /// `_target` is unused but accepted to match the subset-aware signature.
     pub fn mi_factor(&self, _target: IntT) -> usize {
         self.nvars - 2
     }
 
+    /// Aggregate minsum `Σ_state Σ_{by} min(LMR(about, src), LMR(about, by))`.
+    ///
+    /// Forwards to [`LMRSA::minsum_wsrc`] using `src_var` as the table
+    /// index (since the table covers every variable, `src_var` is its own
+    /// position).
     pub fn minsum(&self, src_var: IntT) -> Result<FloatT, Error> {
         Ok(self.lmr.minsum_wsrc(src_var.to_usize().unwrap()))
     }
 }
 
+/// Subset-restricted variant of [`LMRDataStructure`].
+///
+/// Stores LMR tables only for the variables in `subset_map`. Queries whose
+/// `src_var` is in the subset are O(dim) lookups via
+/// [`LMRSA::minsum_wsrc`]; queries for `src_var` outside the subset fall
+/// back to [`LMRSA::minsum_nosrc`] after fetching the relevant LMR vector
+/// from the parent [`MRVTrait`].
 pub struct LMRSubsetDataStructure<IntT, FloatT>
 where
     IntT: 'static + PNInteger,
     FloatT: 'static + PNFloat,
 {
+    /// External-id → subset-local-index map shared across the pair of
+    /// tables built for one MISI record.
     subset_map: Rc<HashMap<IntT, usize>>,
+    /// Variable this table is centered on.
     about: IntT,
+    /// Number of subset variables tracked (`subset_map.len()`).
     nvars: usize,
+    /// Sorted/prefix-sum/rank tables, one segment per state of `about`,
+    /// covering only the subset variables.
     lmr: LMRSA<IntT, FloatT>,
 }
 
@@ -595,6 +892,7 @@ where
     IntT: 'static + PNInteger,
     FloatT: 'static + PNFloat,
 {
+    /// Build a subset-restricted table for `about` keyed by `subset_map`.
     pub fn new(
         pidata: &impl MRVTrait<IntT, FloatT>,
         about: IntT,
@@ -608,10 +906,16 @@ where
         })
     }
 
+    /// `about` variable this table was built for.
     pub fn get_about(&self) -> IntT {
         self.about
     }
 
+    /// PUC scaling factor for the subset.
+    ///
+    /// Returns `nvars - (1 if about is in the subset else 0) - (1 if target
+    /// is in the subset else 0)` so the count matches the number of
+    /// non-endpoint subset variables used in the underlying minsum.
     pub fn mi_factor(&self, target: IntT) -> usize {
         self.nvars
             - (if self.subset_map.contains_key(&self.about) {
@@ -625,6 +929,13 @@ where
             })
     }
 
+    /// Aggregate minsum that handles both in-subset and out-of-subset
+    /// sources transparently.
+    ///
+    /// * If `src_var` is in `subset_map`, dispatch to
+    ///   [`LMRSA::minsum_wsrc`] with the subset-local index.
+    /// * Otherwise pull `LMR(about, src_var)` from `pidata` and route
+    ///   through [`LMRSA::minsum_nosrc`].
     pub fn minsum(
         &self,
         pidata: &impl MRVTrait<IntT, FloatT>,

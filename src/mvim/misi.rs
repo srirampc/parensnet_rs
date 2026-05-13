@@ -1,3 +1,28 @@
+//! HDF5-backed bundles of MI / SI / LMR data for a pair (or pair of ranges)
+//! of random variables.
+//!
+//! The PUC pipeline writes per-variable histograms, mutual information
+//! `mi`, specific information `si` and log-marginal-ratio `lmr` arrays into
+//! a single HDF5 file (`/data/...`). This module provides two materialized
+//! views of that file that satisfy [`MRVTrait`] so the redundancy / PUC
+//! kernels in [`crate::mvim::rv`] can run against precomputed data:
+//!
+//! * [`MISIRangePair`] — loads the slices for a pair of *index ranges*
+//!   `(s_range, t_range)` so PUC can be evaluated for every `(i, j)` with
+//!   `i ∈ s_range`, `j ∈ t_range`. Used by the parallel network kernels
+//!   that distribute pair work across MPI ranks.
+//! * [`MISIPair`] — loads the slices for a single variable pair `(pi, pj)`
+//!   only. Used by the per-edge work items where a full range read would
+//!   be wasteful.
+//!
+//! Both structs cache an optional fast LMR lookup table built from
+//! [`LMRDataStructure`] / [`LMRSubsetDataStructure`]; the variant in use is
+//! tagged by [`LMRDSRange`] (range case) or [`LMRDSPair`] (single-pair
+//! case). When set, the trait method
+//! [`MRVTrait::get_lmr_minsum`] dispatches to the precomputed
+//! sorted/prefix-sum/rank tables instead of the O(nvars · dim) reference
+//! implementation, giving the PUC scoring kernels their main speed-up.
+
 #![allow(dead_code)]
 use hdf5::{self, H5Type};
 use ndarray::Array1;
@@ -18,62 +43,137 @@ use crate::mvim::rv::{
 use crate::types::{PNFloat, PNInteger, Pair};
 use crate::util::{exc_prefix_sum, triu_pair_to_index};
 
+/// LMR fast-lookup tables attached to a [`MISIRangePair`].
+///
+/// The two `Pair`-wrapped vectors hold one [`LMRDataStructure`] /
+/// [`LMRSubsetDataStructure`] per variable in the corresponding source /
+/// target range. The variant is chosen by
+/// [`MISIRangePair::set_lmr_ds`]: pass `None` for the full distribution
+/// (`Complete`) or a subset slice for `Subset`.
 pub enum LMRDSRange<IntT: 'static + PNInteger, Float: 'static + PNFloat> {
+    /// Tables covering every variable in the distribution; one entry per
+    /// variable in `s_range` (`first`) and `t_range` (`second`).
     Complete(Box<Pair<Vec<LMRDataStructure<IntT, Float>>>>),
+    /// Tables covering only the variables in the active subset.
     Subset(Box<Pair<Vec<LMRSubsetDataStructure<IntT, Float>>>>),
 }
 
+/// Materialized MI / SI / LMR data for every `(i, j)` with `i ∈ s_range`
+/// and `j ∈ t_range`.
+///
+/// All arrays are laid out as concatenations of per-variable segments and
+/// indexed via the start/dim arrays. The struct implements [`MRVTrait`] so
+/// it can drive the redundancy / PUC scoring routines in
+/// [`crate::mvim::rv`].
 pub struct MISIRangePair<SizeT, IntT, FloatT>
 where
     SizeT: H5Type + PNInteger,
     IntT: H5Type + PNInteger,
     FloatT: H5Type + PNFloat,
 {
+    /// `(s_range, t_range)` — the source / target index ranges this view
+    /// covers.
     st_ranges: Pair<Range<usize>>,
+    /// Total number of observations in the underlying distribution.
     nobs: SizeT,
+    /// Total number of variables in the underlying distribution.
     nvars: SizeT,
+    /// Total number of unique variable pairs (n choose 2 in HDF5).
     npairs: SizeT,
+    /// Total length of the global SI buffer (used as a sanity check).
     nsi: SizeT,
+    /// Per-variable starting offsets into the flat `hist` array for each
+    /// range.
     hist_start: Pair<Array1<SizeT>>,
+    /// Per-variable starting offsets into the flat `si` array for each
+    /// range.
     si_start: Pair<Array1<SizeT>>,
+    /// Per-variable histogram dimensions for each range.
     hist_dim: Pair<Array1<IntT>>,
+    /// Concatenated histograms for every variable in each range.
     hist: Pair<Array1<FloatT>>,
+    /// Global mutual-information array indexed by `triu_pair_to_index`.
     mi: Array1<FloatT>,
+    /// Concatenated specific-information arrays for each range.
     si: Pair<Array1<FloatT>>,
+    /// Concatenated log-marginal-ratio arrays for each range.
     lmr: Pair<Array1<FloatT>>,
+    /// Range-local exclusive prefix sum of `hist_dim * nvars` — start
+    /// offset of each range variable's SI segment in the loaded `si` /
+    /// `lmr` buffers.
     range_si_start: Pair<Array1<usize>>,
+    /// Range-local exclusive prefix sum of `hist_dim` — start offset of
+    /// each range variable's histogram segment in the loaded `hist`
+    /// buffer.
     range_hist_start: Pair<Array1<usize>>,
+    /// Set membership for each range, used by `_range_offset` lookups.
     range_set: Pair<HashSet<usize>>,
+    /// Variable-id → range index map: `0` for `s_range`, `1` for
+    /// `t_range`, `2` for variables outside both ranges.
     range_lookup: Array1<usize>,
+    /// Optional subset of variable ids passed to
+    /// [`set_lmr_ds`](Self::set_lmr_ds).
     subset_var: Option<Vec<IntT>>,
+    /// Subset variable id → local index map shared between the LMR data
+    /// structures.
     subset_map: Rc<HashMap<IntT, usize>>,
+    /// Optional precomputed LMR tables enabling O(dim) PUC queries.
     lmr_ds: Option<LMRDSRange<IntT, FloatT>>,
 }
 
+/// LMR fast-lookup tables attached to a [`MISIPair`].
+///
+/// Mirror of [`LMRDSRange`] for the single-pair case; the inner [`Pair`]
+/// holds one entry for `pi` and one for `pj`.
 pub enum LMRDSPair<IntT: 'static + PNInteger, Float: 'static + PNFloat> {
+    /// Tables covering every variable in the distribution.
     Complete(Box<Pair<LMRDataStructure<IntT, Float>>>),
+    /// Tables covering only the variables in the active subset.
     Subset(Box<Pair<LMRSubsetDataStructure<IntT, Float>>>),
 }
 
+/// Materialized MI / SI / LMR data for a single variable pair `(pi, pj)`.
+///
+/// Loads only the slices needed by one PUC scoring task — useful when the
+/// outer scheduler iterates over individual edges. Implements [`MRVTrait`]
+/// so the same redundancy / PUC routines can run against it as against
+/// [`MISIRangePair`].
 pub struct MISIPair<SizeT, IntT, FloatT>
 where
     SizeT: H5Type + PNInteger,
     IntT: H5Type + PNInteger,
     FloatT: H5Type + PNFloat,
 {
+    /// The pair `(pi, pj)` this view describes.
     var_pair: Pair<usize>,
+    /// Total number of observations in the underlying distribution.
     nobs: SizeT,
+    /// Total number of variables in the underlying distribution.
     nvars: SizeT,
+    /// Total number of unique pairs in HDF5.
     npairs: SizeT,
+    /// Per-endpoint starting offset into the global `hist` array.
     hist_start: Pair<SizeT>,
+    /// Per-endpoint starting offset into the global `si` array.
     si_start: Pair<SizeT>,
+    /// Mutual information `I(pi; pj)`, prefetched from the global `mi`
+    /// array.
     mi: FloatT,
+    /// Histogram dimension of each endpoint.
     hist_dim: Pair<IntT>,
+    /// Marginal histograms for `pi` and `pj`.
     hist: Pair<Array1<FloatT>>,
+    /// `nvars · hist_dim` SI vectors per endpoint, concatenated.
     si: Pair<Array1<FloatT>>,
+    /// `nvars · hist_dim` LMR vectors per endpoint, concatenated.
     lmr: Pair<Array1<FloatT>>,
+    /// Optional subset of variable ids passed to
+    /// [`set_lmr_ds`](Self::set_lmr_ds).
     subset_var: Option<Vec<IntT>>,
+    /// Subset variable id → local index map shared between the LMR data
+    /// structures.
     subset_map: Rc<HashMap<IntT, usize>>,
+    /// Optional precomputed LMR tables enabling O(dim) PUC queries.
     lmr_ds: Option<LMRDSPair<IntT, FloatT>>,
 }
 
@@ -83,6 +183,16 @@ where
     IntT: H5Type + PNInteger,
     FloatT: H5Type + PNFloat,
 {
+    /// Open the HDF5 file at `h5_file` and load every MI / SI / LMR slice
+    /// needed for the cartesian product of the two ranges.
+    ///
+    /// Reads the global `nobs`, `nvars`, `npairs`, `nsi` attributes, the
+    /// per-variable `hist_dim`, `hist_start`, `si_start` arrays sliced by
+    /// the requested ranges, the entire `mi` array, and the contiguous
+    /// per-range slices of the `hist`, `si`, and `lmr` datasets needed to
+    /// satisfy queries on the requested ranges. Range membership lookup
+    /// (`range_lookup`, `range_set`, `range_si_start`, `range_hist_start`)
+    /// is precomputed so [`MRVTrait`] queries dispatch in O(1).
     pub fn new(
         h5_file: &str,
         st_ranges: (Range<usize>, Range<usize>),
@@ -171,6 +281,15 @@ where
         })
     }
 
+    /// Build the LMR fast-lookup tables for both ranges and stash them in
+    /// [`Self::lmr_ds`].
+    ///
+    /// Pass `Some(subset_var)` to restrict the tables to a fixed subset of
+    /// variable ids — each LMR data structure stores only those columns
+    /// and falls back to a binary search for queries outside the subset.
+    /// Pass `None` to build full-distribution tables. Must be called
+    /// before any [`MRVTrait`] PUC routine that uses precomputed minsum
+    /// (`get_lmr_minsum`, `compute_lm_puc`, ...).
     pub fn set_lmr_ds(
         &mut self,
         subset_var: Option<&[IntT]>,
@@ -370,6 +489,8 @@ where
         self.nvars.to_usize().unwrap()
     }
 
+    /// Computing sum, `Σ_by Σ_state min(LMR(about, target)(s), LMR(about, by)(s))`.
+    /// Use precomputed [`LMRSA`] tables to the O(dim) sorted-prefix-sum kernel.
     fn get_lmr_minsum(&self, about: IntT, target: IntT) -> Result<FloatT, Error> {
         let (ridx, vloc) = self._range_offset(about)?;
         match &self.lmr_ds {
@@ -385,6 +506,7 @@ where
         }
     }
 
+    /// Get PUC factor from the corresponding LMRDS
     fn get_puc_factor(&self, about: IntT, target: IntT) -> Result<FloatT, Error> {
         let (ridx, vloc) = self._range_offset(about)?;
         let pfactor = match &self.lmr_ds {
@@ -419,6 +541,14 @@ where
     IntT: H5Type + PNInteger,
     FloatT: H5Type + PNFloat,
 {
+    /// Open the HDF5 file at `h5_file` and load the MI / SI / LMR slices
+    /// for the single variable pair `(pi, pj)`.
+    ///
+    /// Reads only the histograms, SI and LMR segments belonging to `pi`
+    /// and `pj` (using `hist_start` / `si_start` / `hist_dim` to compute
+    /// each segment's range) plus the single MI value
+    /// `mi[triu_pair_to_index(nvars, pi, pj)]`. Cheaper than
+    /// [`MISIRangePair::new`] when only one edge needs scoring.
     pub fn new(
         h5_file: &str,
         var_pair: (usize, usize),
@@ -485,6 +615,13 @@ where
         })
     }
 
+    /// Build the LMR fast-lookup tables for the single pair `(pi, pj)`
+    /// and stash them in [`Self::lmr_ds`].
+    ///
+    /// Same semantics as [`MISIRangePair::set_lmr_ds`] — pass
+    /// `Some(subset_var)` for a subset-restricted table or `None` for the
+    /// full distribution. Required before any precomputed-minsum PUC
+    /// query.
     pub fn set_lmr_ds(
         &mut self,
         subset_var: Option<&[IntT]>,
@@ -517,7 +654,12 @@ where
         Ok(())
     }
 
-    // range indicator
+    /// Map a variable id to its slot inside [`var_pair`](Self::var_pair).
+    ///
+    /// Returns `0` when `i == var_pair.first` (`pi`), `1` when
+    /// `i == var_pair.second` (`pj`), and [`Error::InvalidIndex`]
+    /// otherwise. Used internally to dispatch [`MRVTrait`] queries to the
+    /// matching `Pair` half.
     pub fn range_of<T: ToPrimitive>(&self, i: T) -> Result<usize, Error> {
         let uix = i.to_usize().unwrap();
         if self.var_pair.first == uix {
@@ -621,6 +763,8 @@ where
         self.nvars.to_usize().unwrap()
     }
 
+    /// Computing sum, `Σ_by Σ_state min(LMR(about, target)(s), LMR(about, by)(s))`.
+    /// Use precomputed [`LMRSA`] tables to the O(dim) sorted-prefix-sum kernel.
     fn get_lmr_minsum(&self, about: IntT, target: IntT) -> Result<FloatT, Error> {
         let ridx = self.range_of(about)?;
         match &self.lmr_ds {
@@ -636,6 +780,7 @@ where
         }
     }
 
+    /// Get PUC factor from the corresponding LMRDS
     fn get_puc_factor(&self, about: IntT, target: IntT) -> Result<FloatT, Error> {
         let ridx = self.range_of(about)?;
         let pfactor = match &self.lmr_ds {

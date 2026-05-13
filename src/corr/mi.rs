@@ -1,8 +1,36 @@
+//! B-spline mutual-information estimator.
+//!
+//! Two complementary code paths are provided:
+//!
+//! 1. Thin wrappers ([`bspline_weights`], [`bspline_mi`]) around the
+//!    `f32`-only C kernels exported by the bundled `mcpnet_rs` crate
+//!    (`bspline_weights_f32`, `bspline_mi_kernel_f32`). Inputs are
+//!    converted to `f32`, dispatched, and the output cast back to the
+//!    caller's float type via [`crate::types::PNFloat`].
+//! 2. A pure-Rust reference implementation [`BSplineWeights`] that builds
+//!    the knot vector once at construction time and exposes the per-sample
+//!    weight matrix [`BSplineWeights::w`], its 1D histogram
+//!    [`BSplineWeights::hist1d`] and the corresponding Shannon entropy
+//!    ([`BSplineWeights::entropy1d`] / [`BSplineWeights::entropy1d_2`]).
+//!
+//! The Rust path follows Daub et al. ("Estimating mutual information
+//! using B-spline functions – an improved similarity measure for analysing
+//! gene expression data", BMC Bioinformatics 2004) with the basis-function
+//! corrections described on the MathWorld B-spline pages. Entropies are
+//! computed in bits (log base 2).
+
 use std::marker::PhantomData;
 
 use crate::types::PNFloat;
 use mcpnet_rs::{bspline_mi_kernel_f32, bspline_weights_f32};
 
+/// Compute the B-spline weight matrix for a 1D sample vector via the
+/// bundled C kernel `bspline_weights_f32`.
+///
+/// Returns a length `num_bins * num_samples + 1` vector laid out as
+/// `num_bins` consecutive segments of length `num_samples` (the trailing
+/// element matches the C ABI). Inputs and outputs are converted to/from
+/// `f32` because the underlying kernel only supports single precision.
 pub fn bspline_weights<FT>(
     data: &[FT],
     num_bins: usize,
@@ -31,6 +59,12 @@ where
         .collect()
 }
 
+/// Compute mutual information `I(X; Y)` between two paired sample vectors
+/// using the bundled C kernel `bspline_mi_kernel_f32`.
+///
+/// `x_data` and `y_data` must have length `num_samples`. The result is in
+/// bits (the C kernel uses `log2`). Inputs are converted to `f32` for the
+/// call and the result is cast back to `FT`.
 pub fn bspline_mi<FT>(
     x_data: &[FT],
     y_data: &[FT],
@@ -59,6 +93,12 @@ where
     .unwrap_or_default()
 }
 
+/// Build the open uniform knot vector used by the recursive B-spline basis.
+///
+/// Layout (length `n_bins + spline_order`): the first `spline_order` knots
+/// are clamped to `0`, the next `n_bins - spline_order` knots are evenly
+/// spaced on `(0, 1)`, and the trailing `spline_order` knots are clamped to
+/// `1`. Reproduces the construction in Daub et al. 2004 §2.1.
 fn build_knot_vector<KT>(n_bins: usize, spline_order: usize) -> Vec<KT>
 where
     KT: PNFloat + Default,
@@ -101,12 +141,31 @@ where
     v
 }
 
+/// Pure-Rust B-spline weight builder for one variable.
+///
+/// Bundles the immutable parameters of the basis (`n_bins`, `spline_order`,
+/// `n_samples`), the precomputed knot vector and the per-sample
+/// normalization factor `1/n_samples`. `DT` is the input data type and `OT`
+/// is the output / weight float type — kept separate so a `f32` data array
+/// can drive an `f64` accumulation if higher precision is needed for
+/// entropy.
+///
+/// Typical usage: build once with [`new`](Self::new), reuse across multiple
+/// columns by feeding sample slices to [`w`](Self::w), which returns the
+/// flattened `n_bins × n_samples` weight matrix and the corresponding
+/// 1D Shannon entropy in bits.
 pub struct BSplineWeights<DT, OT> {
+    /// Number of histogram bins (B-spline basis functions).
     n_bins: usize,
+    /// Polynomial order of the B-splines (degree + 1).
     spline_order: usize,
+    /// Number of samples per evaluation.
     n_samples: usize,
+    /// Open uniform knot vector built by [`build_knot_vector`].
     knot_vector: Vec<DT>,
+    /// `1 / n_samples`, cached as `f64` for the entropy reduction.
     norm_factor: f64,
+    /// Phantom marker tying the impl block to the output float type.
     _ot: PhantomData<OT>,
 }
 
@@ -115,8 +174,15 @@ where
     DT: PNFloat + Default,
     OT: PNFloat + Default,
 {
-    // Follows Daub et al, which contains mistakes;
-    // corrections based on spline descriptions on MathWorld pages
+    /// Recursive Cox–de Boor evaluation of the `i`-th basis function of
+    /// order `p` at parameter `t`.
+    ///
+    /// Implements the Daub et al. recursion with the corrections from the
+    /// MathWorld B-spline pages: returns `1` when `t` lies in
+    /// `[knot[i], knot[i+1])` (or exactly hits the right boundary of the
+    /// last bin) at order 1, and combines the two child evaluations
+    /// proportionally to the knot spacing for higher orders. Tiny negative
+    /// rounding artifacts are clamped to `0`.
     fn basis_function(&self, i: usize, p: usize, t: DT) -> OT {
         if p == 1 {
             if (t >= self.knot_vector[i]
@@ -172,6 +238,8 @@ where
         }
     }
 
+    /// Collapse a flat `n_bins × n_samples` weight matrix into a 1D
+    /// histogram by summing each bin's segment and scaling by `1/n_samples`.
     pub fn hist1d(&self, weight_vec: &[OT]) -> Vec<OT> {
         //  for (int curBin = 0; curBin < numBins; curBin++) {
         (0..self.n_bins)
@@ -195,6 +263,9 @@ where
             .collect()
     }
 
+    /// Shannon entropy `H = -Σ p log2 p` of the soft histogram derived
+    /// from `weight_vec` via [`hist1d`](Self::hist1d). Bins with zero mass
+    /// are skipped to avoid `log(0)`.
     pub fn entropy1d(&self, weight_vec: &[OT]) -> OT {
         // OT H = 0.0;
         let hist = self.hist1d(weight_vec);
@@ -210,6 +281,10 @@ where
         OT::zero() - h
     }
 
+    /// Fused variant of [`entropy1d`](Self::entropy1d): walks
+    /// `weight_vec` once, accumulating each bin's mass and reducing to
+    /// `H = -Σ p log2 p` without materializing the histogram. Asserts
+    /// `weight_vec.len() >= n_bins * n_samples`.
     pub fn entropy1d_2(&self, weight_vec: &[OT]) -> OT {
         assert!(weight_vec.len() >= self.n_bins * self.n_samples);
         //  OT H = 0.0;
@@ -242,6 +317,8 @@ where
         //  return 0.0 - H;
     }
 
+    /// Construct a [`BSplineWeights`] from the basis parameters, building
+    /// the open uniform knot vector and caching `1/n_samples`.
     pub fn new(n_bins: usize, spline_order: usize, n_samples: usize) -> Self {
         Self {
             norm_factor: 1.0 / n_samples as f64,
@@ -253,6 +330,9 @@ where
         }
     }
 
+    /// Copy the basis parameters and knot vector from `other` into `self`.
+    /// Useful when reusing an allocation across variables that share the
+    /// same `(n_bins, spline_order, n_samples)` shape.
     pub fn set(&mut self, other: &Self) {
         self.n_bins = other.n_bins;
         self.n_samples = other.n_samples;
@@ -261,10 +341,20 @@ where
         self.knot_vector = other.knot_vector.clone();
     }
 
+    /// Number of histogram bins (B-spline basis functions) configured.
     pub fn num_bins(&self) -> usize {
         self.n_bins
     }
 
+    /// Evaluate the full B-spline weight matrix and its 1D Shannon
+    /// entropy for the sample slice `in_vec` (of length `n_samples`).
+    ///
+    /// Returns `(weights, H)` where `weights` is a flat
+    /// `n_bins * n_samples` vector laid out as `n_bins` consecutive
+    /// per-sample segments and `H` is the entropy in bits computed by
+    /// [`entropy1d_2`](Self::entropy1d_2). The two outputs together feed
+    /// into the joint-entropy / mutual-information assembly performed by
+    /// callers.
     pub fn w(&self, in_vec: &[DT]) -> (Vec<OT>, OT) {
         //  int num_weights = numSamples * numBins;
         let n_weights = self.n_samples * self.n_bins;
