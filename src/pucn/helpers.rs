@@ -1,3 +1,31 @@
+//! Building blocks shared by the MI/SI workflows in [`crate::pucn`].
+//!
+//! Module includes structs for computing per-variable 
+//! Bayesian-blocks ([`Node`] ) and for computing per-pair joint histograms / 
+//! mutual-information / specific-information / LMR vectors 
+//! ([`NodePairCollection`], [`PairMICollection`] and [`OrdPairSICollection`]).
+//! The workflows defined in [`crate::pucn::misiw`] delegate the per-step work 
+//! to the static methods of [`MISIWorkFlowHelper`]:
+//!
+//! 1. [`MISIWorkFlowHelper::construct_nodes`] reads the local column
+//!    range from the AnnData file, builds one [`Node`] per variable
+//!    with [`Node::from_data`], and gathers the per-rank vector into
+//!    a communicator-wide [`NodeCollection`].
+//! 2. [`MISIWorkFlowHelper::construct_node_pairs_in_batches`] iterates
+//!    over batches of pairs (2-D block distributed), loads the matching
+//!    column blocks via [`MISIWorkFlowHelper::load_batch_data`], and
+//!    fills [`BatchPairs`] with [`NodePair`] results obtained from
+//!    [`MISIWorkFlowHelper::build_node_pair`]. The flattened, sorted
+//!    output is wrapped into a [`NodePairCollection`].
+//! 3. [`MISIWorkFlowHelper::construct_hist_node_pairs`] computes only histogram
+//!    for pairs of variables. It is used by the
+//!    `hist_*` workflow stages; the LMR computation can later be applied to a
+//!    previously computed [`PairMICollection`] via
+//!    [`MISIWorkFlowHelper::construct_lmr_node_pairs`].
+//! 4. The `write_*` methods save [`NodeCollection`],
+//!    [`PairMICollection`] and [`OrdPairSICollection`] to HDF5 files on disk 
+//!    using [`crate::h5::io`] and [`crate::h5::mpio`].
+
 use anyhow::{Ok, Result};
 use hdf5::H5Type;
 use mpi::traits::{CommunicatorCollectives, Equivalence};
@@ -27,7 +55,23 @@ use crate::{
     util::{triu_index_to_pair, triu_pair_to_index},
 };
 
+/// Stateless namespace bundling the helper routines used by the MI/SI
+/// workflows in [`crate::pucn::misiw`].
+///
+/// The struct only carries a [`PhantomData`] marker so the three
+/// numeric type parameters can be supplied once at the call site
+/// (`MISIWorkFlowHelper::<i64, i32, f32>::construct_nodes(...)`) and
+/// reused by every method.
+///
+/// The type parameters are:
+/// * `SizeT` — offset/count type used by the flattened collections
+///   and the HDF5 attributes (typically `i64`).
+/// * `IntT` — per-variable integer type used for bin / histogram
+///   dimensions and pair indices (typically `i32`).
+/// * `FloatT` — element type of the expression matrix and the
+///   histogram / MI / SI / LMR payloads (typically `f32`).
 pub(super) struct MISIWorkFlowHelper<SizeT, IntT, FloatT> {
+    /// Phantom marker for the three numeric type parameters.
     _a: PhantomData<(SizeT, IntT, FloatT)>,
 }
 
@@ -37,6 +81,13 @@ where
     IntT: PNInteger + H5Type + Default + Equivalence,
     FloatT: 'static + PNFloat + H5Type + Default + Equivalence,
 {
+    /// Build the communicator-wide [`NodeCollection`] for the given workflow.
+    ///
+    /// Reads from [`crate::anndata::AnnData`], the expression data's 
+    /// submatrix corresponding to per-rank variable-block, constructs one
+    /// [`Node`] per local column with [`Node::from_data`], and
+    /// gathers the resulting vector into a single [`NodeCollection`]
+    /// via [`NodeCollection::from_nodes`].
     pub fn construct_nodes(
         wf: &dyn MISIWorkFlowTrait,
         rank: i32,
@@ -86,6 +137,11 @@ where
         Ok(nodes)
     }
 
+    /// Compute the joint 2-D histogram for a single `(x, y)` pair of
+    /// variables.
+    ///
+    /// Looks up each variable's bin edges from [`NodeCollection::bins`]
+    /// and dispatches to [`histogram_2d`].
     pub(super) fn compute_hist_node_pair(
         nodes: &NodeCollection<SizeT, IntT, FloatT>,
         indices: (usize, usize),
@@ -102,6 +158,21 @@ where
         )
     }
 
+    /// Compute the per-pair MI / SI / LMR vectors from a joint histogram.
+    ///
+    /// Computes the log-JVI ratio with [`log_jvi_ratio`] and uses it
+    /// as the input to:
+    ///
+    /// * [`mi_from_ljvi`] for the scalar mutual-information value;
+    /// * [`lmr_about_x_from_ljvi`] / [`lmr_about_y_from_ljvi`] for
+    ///   the two LMR vectors;
+    /// * [`si_from_ljvi`] for the two specific-information vectors
+    ///   (skipped when [`WorkflowArgs::lmr_only`] is `true`).
+    ///
+    /// The pair's index is recorded in the returned
+    /// [`PairMI::index`] via [`triu_pair_to_index`]. When
+    /// `lmr_only`, both `OrdPairSI::si` and `PairMI::xy_tab` are set to
+    /// `None` to save memory.
     fn compute_lmr_node_pair(
         nodes: &NodeCollection<SizeT, IntT, FloatT>,
         indices: (usize, usize),
@@ -175,6 +246,8 @@ where
         )
     }
 
+    /// Build the joint histogram with [`Self::compute_hist_node_pair`] and 
+    /// feed it to [`Self::compute_lmr_node_pair`] to produce a [`NodePair`].
     pub fn build_node_pair(
         nodes: &NodeCollection<SizeT, IntT, FloatT>,
         indices: (usize, usize),
@@ -185,6 +258,14 @@ where
         Self::compute_lmr_node_pair(nodes, indices, args, xy_tab)
     }
 
+    /// Read the row-block and column-block expression matrices corresponding
+    /// to the input batch `bidx` on process with `rank`.
+    ///
+    /// Retrieve the rows and columns corresponding to the batch `bidx`
+    /// from the workflow's batch distributions scheme, and read the
+    /// submatrices corresponding to the row-variables and column-variables
+    /// [`crate::anndata::AnnData::par_rmajor_read_range_data_around`]
+    /// calls (rounded with [`WorkflowArgs::nroundup`]).
     pub(super) fn load_batch_data(
         wf: &dyn MISIWorkFlowTrait,
         rank: i32,
@@ -208,6 +289,16 @@ where
         Ok(block_data)
     }
 
+    /// For a given batch `bidx` and process ranked `rank`,
+    /// compute all the joint histograms for the assigned 2-D pair ranges
+    /// returning a flat `Vec<PairMI>`. 
+    /// NOTE:: [`PairMI::mi`] left as zero — the MI value is expected to 
+    /// be filled in later by [`Self::construct_lmr_node_pairs`]).
+    ///
+    /// Loads the row/column expression data via
+    /// [`Self::load_batch_data`], iterates over the upper-triangular
+    /// pairs (`row < col`), and constructs a [`PairMI`] object via
+    /// [`Self::compute_hist_node_pair`].
     fn construct_hist_node_pairs_for_batch(
         wf: &dyn MISIWorkFlowTrait,
         rank: i32,
@@ -256,6 +347,12 @@ where
         Ok(v_hist)
     }
 
+    /// Compute all [`NodePair`] results (joint histogram + MI +
+    /// SI + LMR) for the pairs (2-D block distributed) in batch `bidx` and
+    /// returns objects in a [`BatchPairs`] accumulator.
+    ///
+    /// The resulting [`BatchPairs`] holds SI vectors in both directions 
+    /// and the MI per pair.
     fn construct_node_pairs_for_batch(
         wf: &dyn MISIWorkFlowTrait,
         rank: i32,
@@ -314,6 +411,12 @@ where
         Ok(batch_pairs)
     }
 
+    /// Run [`Self::construct_hist_node_pairs_for_batch`] for every
+    /// batch, flatten the results into a single
+    /// [`PairMICollection`] (sorted by pair index), and return it.
+    ///
+    /// Used by the `hist_*` workflow modes that only need the joint
+    /// histograms; excludes the MI / SI / LMR step.
     pub fn construct_hist_node_pairs(
         wf: &dyn MISIWorkFlowTrait,
         rank: i32,
@@ -342,6 +445,14 @@ where
         Ok(v_hist)
     }
 
+    /// Runs the `MI/SI` batch-by-batch pipeline and returns the
+    /// result as a [`NodePairCollection`].
+    ///
+    /// For each batch in the workflow's batch distribution scheme, 
+    /// calls [`Self::construct_node_pairs_for_batch`], then flattens the
+    /// per-batch [`BatchPairs`] into three vectors (`v_pmi`, `v_si`,
+    /// `v_siy`) before delegating the final assembly and sort to
+    /// [`Self::construct_node_pairs_collection`].
     pub fn construct_node_pairs_in_batches(
         wf: &dyn MISIWorkFlowTrait,
         rank: i32,
@@ -372,6 +483,15 @@ where
         )
     }
 
+    /// Sort the pair-wise results, and wrap them into the flattened
+    /// [`OrdPairSICollection`] / [`PairMICollection`] and returns
+    /// the result as a [`NodePairCollection`].
+    ///
+    /// `v_pmi` is sorted by `(about, by)` pair, the two SI direction
+    /// vectors (`v_si` and `v_siy`) are merged and sorted by
+    /// `(about, by)`, and the resulting flat vectors are then
+    /// collected via [`OrdPairSICollection::from_vec`] /
+    /// [`PairMICollection::from_vec`].
     fn construct_node_pairs_collection(
         mpi_ifx: &CommIfx,
         nodes: &NodeCollection<SizeT, IntT, FloatT>,
@@ -411,6 +531,14 @@ where
         Ok((v_si, v_pmi))
     }
 
+    /// Compute MI / SI / LMR from a previously computed [`PairMICollection`]
+    /// of joint histograms.
+    ///
+    /// Reconstructs joint histogram for each pair from the 
+    /// flat [`PairMICollection::xy_tab`], feeds it into 
+    /// [`Self::compute_lmr_node_pair`], and assembles the results 
+    /// with [`Self::construct_node_pairs_collection`].
+    ///  NOTE::: The joint (x,y) histograms are mandatory input.
     pub fn construct_lmr_node_pairs(
         wf: &dyn MISIWorkFlowTrait,
         nodes: &NodeCollection<SizeT, IntT, FloatT>,
@@ -468,6 +596,13 @@ where
         }
     }
 
+    /// Save a [`NodeCollection`] on disk to an existing HDF5 `data` group.
+    ///
+    /// Writes the scalar attributes (`nvars`, `nobs`, `npairs`,
+    /// `nsi`) followed by the dimension / offset / payload arrays
+    /// (`hist_dim`, `hist_start`, `hist`, `bins_dim`, `bins_start`,
+    /// `bins`, `si_start`). The layout matches the one consumed by
+    /// [`NodeCollection::from_h5`].
     pub fn write_node_data(
         wf: &dyn MISIWorkFlowTrait,
         nodes: &NodeCollection<SizeT, IntT, FloatT>,
@@ -502,6 +637,9 @@ where
         Ok(())
     } 
 
+    /// Convenience wrapper that creates HDF5 file `misi_data_file`, makes a
+    /// `data` group inside it, and calls [`Self::write_node_data`] to
+    /// dump the [`NodeCollection`].
     pub fn write_nodes_h5(
         wf: &dyn MISIWorkFlowTrait,
         nodes: &NodeCollection<SizeT, IntT, FloatT>,
@@ -513,24 +651,17 @@ where
         Ok(())
     }
 
+    /// Append a [`PairMICollection`] to an existing histogram HDF5
+    /// file using the parallel-IO.
+    ///
+    /// Opens `hist_data_file` collectively read/write, then writes 
+    /// `data/pair_hist` (when an `xy_tab` is present) and `data/mi`. 
+    /// NOTE:: Each rank contributes the slice of the global arrays it owns.
     pub fn write_hist_pairs(
         w: &dyn MISIWorkFlowTrait,
         hist_pairs: &PairMICollection<IntT, FloatT>,
         hist_data_file: &str,
     ) -> Result<()> {
-        // let rank_out_file = format!(
-        //     "{}.{:04}.{}",
-        //     hist_data_file.strip_suffix(".h5").unwrap_or_default(),
-        //     w.comm_ifx().rank,
-        //     "h5"
-        // );
-        // let h5_fptr = io::create_file(&rank_out_file)?;
-        // let data_group = h5_fptr.create_group("data")?;
-        // if let Some(xy_tab) = hist_pairs.xy_tab.as_ref() {
-        //     io::write_1d(&data_group, "pair_hist", xy_tab)?;
-        // }
-        // io::write_1d(&data_group, "mi", &hist_pairs.mi)?;
-        // h5_fptr.close()?;
 
         let h5_fptr =
             mpio::open_file_rw(w.comm_ifx(), hist_data_file)?;
@@ -542,6 +673,12 @@ where
         Ok(())
     }
 
+    /// Append the per-pair MI / SI / LMR vectors to the workflow's
+    /// MISI HDF5 file using parallel IO.
+    ///
+    /// Opens [`WorkflowArgs::misi_data_file`] collectively read/write
+    /// and writes`data/mi`, `data/si` (when present), and `data/lmr`. 
+    /// NOTE:: Each rank writes the slice of the global arrays it owns.
     pub fn write_node_pairs(
         w: &dyn MISIWorkFlowTrait,
         npairs_si: &OrdPairSICollection<IntT, FloatT>,

@@ -523,6 +523,7 @@ where
         Ok(FloatT::from_usize(pfactor).unwrap())
     }
 
+    // Compute PUC via get_lmr_minsum
     fn compute_lm_puc(&self, i: IntT, j: IntT) -> Result<FloatT, Error> {
         let mij = self.get_mi(i, j)?;
         if mij <= FloatT::zero() {

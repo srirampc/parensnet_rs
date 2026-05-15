@@ -17,9 +17,9 @@
 //!   [`triu_block_ranges_2d`], [`triu_block_ranges_2d_no_diag`],
 //!   [`diag_block_ranges`], [`matrix_diagonal`],
 //!   [`diag_batch_distribution`]).
-//! * Pair-work distribution structures ([`BatchBlocks2D`],
-//!   [`DiagBatchBlocks2D`], [`SeqBatchBlocks2D`], [`EBBlocks2D`],
-//!   [`PairWorkDistributor`]).
+//! * All-pairs work distribution using tiled squares/2-D blocks
+//!   ([`BatchBlocks2D`], [`DiagBatchBlocks2D`], [`SeqBatchBlocks2D`],
+//!   [`EBBlocks2D`], [`PairWorkDistributor`]).
 //! * Numerical helpers ([`unique`], [`UniqCounts`], [`around`]).
 //! * Index/value result containers ([`IdVResults`]).
 //! * I/O helpers ([`read_file_to_string`], [`read_csv_column`]).
@@ -305,13 +305,15 @@ where
 ///
 /// Only entries with `i < j` (i.e. above the diagonal) are valid, and
 /// the diagonal itself is not included in the enumeration.
-///  Example showing results for of square matrix of side, n=5:
-///   i/j   0 1 2 3 4
-///   0    [. 0 1 2 3]
-///   1    [- . 4 5 6]
-///   2    [- - . 7 8]
-///   3    [- - - . 9]
-///   4    [- - - - .]
+/// Example showing results for of square matrix of side, n=5:
+/// ```ignore 
+///     i/j   0 1 2 3 4
+///     0    [. 0 1 2 3]
+///     1    [- . 4 5 6]
+///     2    [- - . 7 8]
+///     3    [- - - . 9]
+///     4    [- - - - .]
+/// ```
 pub fn triu_pair_to_index<T, S>(n: T, i: S, j: S) -> T
 where
     T: Zero + PartialOrd + FromPrimitive + ToPrimitive,
@@ -341,12 +343,14 @@ where
 /// Inverse of [`triu_pair_to_index`]; given a flat index `k` returns
 /// the `(i, j)` (with `i < j`) it corresponds to.
 ///  Example showing results for n=5:
+/// ```ignore
 ///   i/j   0 1 2 3 4
 ///   0    [. 0 1 2 3]
 ///   1    [- . 4 5 6]
 ///   2    [- - . 7 8]
 ///   3    [- - - . 9]
 ///   4    [- - - - .]
+/// ```
 pub fn triu_index_to_pair<T, S>(n: T, k: T) -> (S, S)
 where
     T: Zero + PartialOrd + ToPrimitive,
@@ -366,7 +370,7 @@ where
 }
 
 // NOTE::
-// Block distribution functions of data of size `n` among `p` processors.
+// Block distribution functions below of data of size `n` among `p` processors.
 // These follow the standard "Quinn block decomposition": when `n` is
 // not divisible by `p`, the first `n mod p` ranks own one extra
 // element so the total is exactly `n`.

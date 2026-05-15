@@ -1,3 +1,28 @@
+//! Data containers used by the `pucn` workflows.
+//!
+//! Every type in this module is `pub(super)`. They form the in-memory
+//! representation of:
+//!
+//! * per-variable histograms ([`Node`], [`NodeCollection`]),
+//! * pair-wise mutual information and joint histograms
+//!   ([`PairMI`], [`PairMICollection`]),
+//! * specific-information / LMR vectors for ordered pairs
+//!   ([`OrdPairSI`], [`OrdPairSICollection`]), and
+//! * small tuple aliases ([`NodePair`], [`BatchPairs`],
+//!   [`NodePairCollection`]) used as work-batch carriers between
+//!   the helper functions in [`crate::pucn::helpers`] and the
+//!   distributed workflows.
+//!
+//! Each `*Collection` type provides:
+//!
+//! * a `from_vec` builder that flattens a per-rank `Vec<*>` into the
+//!   parallel-friendly flat layout (concatenated values plus
+//!   per-element dimension/offset arrays);
+//! * a `from_h5` builder that loads a previously persisted collection
+//!   from an HDF5 file (using [`crate::h5::io`] / [`crate::h5::mpio`]);
+//! * a `distribute` method that re-shuffles the contents across MPI
+//!   ranks via the `all2all*` primitives.
+
 use anyhow::{Ok, Result};
 use hdf5::H5Type;
 use mpi::traits::{Communicator, Equivalence};
@@ -22,14 +47,29 @@ use crate::{
     util::{block_owner, block_range, triu_index_to_pair},
 };
 
+/// Histogram of a single variable produced by the Bayesian-blocks
+/// discretisation kernel.
+///
+/// Stores the bin edges (`bins`) and the per-bin counts (`hist`)
+/// alongside their cached lengths (`nbins`, `nhist`). 
+/// In a parallel setting, one instance is generated per variable that a rank 
+/// owns; the collection of `Node`s is then flattened into a [`NodeCollection`] 
+/// for collective use.
 pub(super) struct Node<IntT, FloatT> {
+    /// Number of bin edges in [`Self::bins`].
     nbins: IntT,
+    /// Number of histogram bins in [`Self::hist`] (typically
+    /// `nbins - 1`).
     nhist: IntT,
+    /// Bin edges produced by [`bayesian_blocks_bin_edges`].
     bins: Array1<FloatT>,
+    /// Histogram counts produced by [`histogram_1d`], aligned with
+    /// [`Self::bins`].
     hist: Array1<FloatT>,
 }
 
 impl<IntT, FloatT> Node<IntT, FloatT> {
+    /// Direct field-wise constructor used by [`Self::from_data`].
     fn new(
         nbins: IntT,
         nhist: IntT,
@@ -44,6 +84,12 @@ impl<IntT, FloatT> Node<IntT, FloatT> {
         }
     }
 
+    /// Build a [`Node`] for a single column of the expression matrix.
+    ///
+    /// Computes the Bayesian-blocks bin edges via
+    /// [`bayesian_blocks_bin_edges`] and fills the histogram with
+    /// [`histogram_1d`]. The cached `nbins` / `nhist` counters are
+    /// derived from the resulting array lengths.
     pub fn from_data(c_data: ArrayView1<FloatT>) -> Self
     where
         FloatT: 'static + HSFloat,
@@ -61,19 +107,56 @@ impl<IntT, FloatT> Node<IntT, FloatT> {
     }
 }
 
+/// Flattened collection of per-variable [`Node`]s.
+///
+/// Holds the bin edges and histograms of all variables in two
+/// concatenated arrays (`abins` and `ahist`) plus per-variable
+/// dimension and offset arrays that allow quick access of 
+/// the slice correspdoning ot variable `i` 
+/// (See [`Self::bins`] / [`Self::hist`]). Built either by
+/// gathering local [`Node`]s across ranks ([`Self::from_nodes`]) or by
+/// loading from disk ([`Self::from_h5`]).
+///
+/// The struct is generic over three numeric types:
+///
+/// * `SizeT` for offset / count fields large enough to index the
+///   flattened arrays;
+/// * `IntT`  for per-variable bin / histogram dimensions;
+/// * `FloatT` for the bin-edge and histogram element type.
 pub(super) struct NodeCollection<SizeT, IntT, FloatT> {
+    /// Per-variable number of bin edges (length `nvars`).
     pub bin_dim: Array1<IntT>,
+    /// Per-variable number of histogram bins (length `nvars`).
     pub hist_dim: Array1<IntT>,
+    /// Exclusive prefix sum of [`Self::bin_dim`]; `bin_start[i]` is
+    /// the offset of variable `i`'s edges inside [`Self::abins`].
     pub bin_start: Array1<SizeT>,
+    /// Per-variable offset into the specific-information storage of
+    /// pair collections; computed from [`Self::hist_dim`] with
+    /// [`bin_dim.len()`](Array1::len) used as the seed value.
     pub si_start: Array1<SizeT>,
+    /// Exclusive prefix sum of [`Self::hist_dim`]; `hist_start[i]` is
+    /// the offset of variable `i`'s histogram inside [`Self::ahist`].
     pub hist_start: Array1<SizeT>,
+    /// Total specific-information storage size:
+    /// `(sum of hist_dim) * nvars`.
     pub nsi: SizeT,
     // bins/hist flattened to a histogram
+    /// Concatenated bin edges across all variables.
     pub abins: Array1<FloatT>,
+    /// Concatenated histogram counts across all variables.
     pub ahist: Array1<FloatT>,
 }
 
 impl<SizeT, IntT, FloatT> NodeCollection<SizeT, IntT, FloatT> {
+    /// Gather a slice of per-rank [`Node`]s into a single,
+    /// flattened collection.
+    ///
+    /// Uses [`allgatherv_full_vec`] to concatenate the local
+    /// `bin_dim` / `hist_dim` arrays and the corresponding bin / hist
+    /// payloads across all ranks, then computes the offset arrays
+    /// (`bin_start`, `hist_start`, `si_start`) and the total
+    /// specific-information storage size [`Self::nsi`].
     pub fn from_nodes(
         v_nodes: &[Node<IntT, FloatT>],
         comm: &dyn Communicator,
@@ -144,6 +227,18 @@ impl<SizeT, IntT, FloatT> NodeCollection<SizeT, IntT, FloatT> {
         })
     }
 
+    /// Load a previously saved-on-disk [`NodeCollection`] from an HDF5
+    /// file.
+    ///
+    /// Reads the dimension / offset / payload datasets from the
+    /// `data` group (`hist_start`, `bins_start`, `si_start`,
+    /// `hist_dim`, `bins_dim`, `hist`, `bins`) and the scalar
+    /// attributes (`nobs`, `nvars`, `nsi`).
+    ///
+    /// When `nvars` is in `1..nvars_in_file`, the dimension and
+    /// offset arrays are truncated to that prefix so callers can
+    /// operate on a sub-range of the persisted variables. Otherwise
+    /// the full arrays are returned.
     pub fn from_h5(h5_file: &str, nvars: usize) -> Result<Self>
     where
         SizeT: H5Type + ToPrimitive,
@@ -199,6 +294,9 @@ impl<SizeT, IntT, FloatT> NodeCollection<SizeT, IntT, FloatT> {
         })
     }
 
+    /// Borrow the histogram counts for variable `idx`, sliced out of
+    /// the flattened [`Self::ahist`] using
+    /// [`Self::hist_start`] / [`Self::hist_dim`].
     pub fn hist(&self, idx: usize) -> ArrayView1<'_, FloatT>
     where
         SizeT: ToPrimitive,
@@ -210,6 +308,9 @@ impl<SizeT, IntT, FloatT> NodeCollection<SizeT, IntT, FloatT> {
         self.ahist.slice(ndarray::s![hstart..hend])
     }
 
+    /// Borrow the bin edges for variable `idx`, sliced out of the
+    /// flattened [`Self::abins`] using
+    /// [`Self::bin_start`] / [`Self::bin_dim`].
     pub fn bins(&self, idx: usize) -> ArrayView1<'_, FloatT>
     where
         SizeT: ToPrimitive,
@@ -221,30 +322,63 @@ impl<SizeT, IntT, FloatT> NodeCollection<SizeT, IntT, FloatT> {
         self.abins.slice(ndarray::s![bstart..bend])
     }
 
+    /// Borrow the per-variable bin-dimension array.
     pub fn bin_dim_ref(&self) -> &Array1<IntT> {
         &self.bin_dim
     }
 
+    /// Number of variables represented (length of [`Self::hist_dim`]).
     pub fn len(&self) -> usize {
         self.hist_dim.len()
     }
 
+    /// `true` when no variables are present.
     pub fn is_empty(&self) -> bool {
         self.hist_dim.is_empty()
     }
 }
 
+/// Mutual-information record for a single pair of variables.
+///
+/// Carries the linearised pair index, the optional `(x, y)` pair, the
+/// optional joint 2-D histogram, and the scalar MI value. Built one
+/// per pair by the helper kernels in [`crate::pucn::helpers`] before
+/// being flattened into a [`PairMICollection`].
 pub(super) struct PairMI<IntT, FloatT> {
+    /// Flat triangular pair index (see
+    /// [`crate::util::triu_index_to_pair`]).
     pub index: usize,
+    /// Optional explicit `(x, y)` pair when carrying the indices is
+    /// useful (e.g. for sampled workflows).
     pub pair: Option<(IntT, IntT)>,
+    /// Optional joint 2-D histogram for this pair; 
+    /// None when only the MI value is needed.
     pub xy_tab: Option<Array2<FloatT>>,
+    /// Mutual-information value.
     pub mi: FloatT,
 }
 
+/// Communicator-wide flattened collection of [`PairMI`] records.
+///
+/// Stores the pair indices, optional dimension pairs, the optional
+/// concatenated joint-histogram payload, and the MI values as
+/// parallel arrays. Built either by gathering local [`PairMI`]
+/// vectors ([`Self::from_vec`]) or by reading from disk
+/// ([`Self::from_h5`]); [`Self::distribute`] reshuffles the contents
+/// across MPI ranks.
 pub(super) struct PairMICollection<IntT, FloatT> {
+    /// Flat pair indices (length = number of pairs on this rank). 
+    /// (pair mapped to index by [`crate::util::triu_index_to_pair`]).
     pub index: Vec<usize>,
+    /// Optional pair of `(x_dim, y_dim)` arrays, parallel to
+    /// [`Self::index`], describing the shape of each joint histogram.
+    /// None when only the MI value is needed.
     pub dims: Option<(Vec<IntT>, Vec<IntT>)>,
+    /// Optional concatenated joint-histogram payload; the slice for
+    /// pair `i` has length `dims.0[i] * dims.1[i]`.
+    /// None when only the MI value is needed.
     pub xy_tab: Option<Array1<FloatT>>,
+    /// Mutual-information values corresponding to [`Self::index`].
     pub mi: Array1<FloatT>,
 }
 
@@ -253,6 +387,15 @@ where
     IntT: Clone + Default + Debug + Equivalence + FromToPrimitive + Zero,
     FloatT: Clone + Default + Debug + H5Type + Equivalence + Zero,
 {
+    /// Parallel-IO load of a [`PairMICollection`] from an HDF5 file.
+    ///
+    /// Distributes the `args.npairs` pair indices across ranks with
+    /// an [`InterleavedDist`], block-reads the matching slice of
+    /// `data/mi`, derives the per-pair joint-histogram dimensions
+    /// from `hist_dim` via [`triu_index_to_pair`], and finally
+    /// block-reads the concatenated `data/pair_hist` payload using an
+    /// [`ArbitDist`] sized by per-rank sum of dim(x) * dim(y), 
+    /// where x,y are the MI pairs.
     pub fn from_h5(
         cx: &CommIfx,
         args: &WorkflowArgs,
@@ -286,6 +429,12 @@ where
         })
     }
 
+    /// Flatten a slice of [`PairMI`] records into a [`PairMICollection`].
+    ///
+    /// If every [`PairMI`] record carries an `xy_tab`, the joint histograms 
+    /// are concatenated and the corresponding `(x_dim, y_dim)` arrays are
+    /// stored. If any record is missing its `xy_tab`, the resulting
+    /// collection drops both `xy_tab` and `dims` (set to `None`).
     pub fn from_vec(vdata: &[PairMI<IntT, FloatT>]) -> Self {
         let index = vdata.iter().map(|x| x.index).collect();
         let mi = vdata.iter().map(|x| x.mi.clone()).collect();
@@ -330,6 +479,15 @@ where
         }
     }
 
+    /// Re-shuffle a [`PairMICollection`] across MPI ranks so that
+    /// each pair index lands on its block-distributed owner.
+    ///
+    /// Computes the per-destination send counts from
+    /// [`block_owner`] (using the global pair count obtained via
+    /// [`allreduce_sum`]), then issues paired
+    /// [`all2all_vec`] / [`all2allv_vec`] exchanges for the index,
+    /// MI, dimension and joint-histogram payloads. Section timings
+    /// are reported through [`SectionTimer`].
     pub fn distribute(&self, mcx: &CommIfx, hist_dim: &[IntT]) -> Result<Self> {
         let s_timer = SectionTimer::from_comm(mcx.comm(), ",");
         let npairs: usize = allreduce_sum(&(self.index.len()), mcx.comm());
@@ -394,20 +552,49 @@ where
     }
 }
 
+/// Specific-information / LMR record for a single `(about, by)` 
+/// ordered variable pair.
+///
+/// `about` is the variable whose specific information is being
+/// described and `by` is the conditioning variable. `si` is optional
+/// because some workflows only retain the LMR (Log Marginal
+/// Ratios) trace.
 pub(super) struct OrdPairSI<IntT, FloatT> {
+    /// Index of the variable being described.
     pub about: IntT,
+    /// Index of the conditioning variable.
     pub by: IntT,
+    /// Optional specific-information vector of length
+    /// `hist_dim[about]`.
     pub si: Option<Array1<FloatT>>,
+    /// LMR vector of length `hist_dim[about]`.
     pub lmr: Array1<FloatT>,
 }
 
+/// Communicator-wide flattened collection of [`OrdPairSI`] records.
+///
+/// Stores the `(about, by)` pairs together with per-pair sizes and
+/// the concatenated `si` / `lmr` payloads. The pair index space is
+/// the full `nvars x nvars` ordered grid (`nord_pairs = nvars *
+/// nvars`); diagonal entries (pairs with about = by) are filled
+/// by [`Self::fill_diag`].
 pub(super) struct OrdPairSICollection<IntT, FloatT> {
+    /// Number of variables along one axis.
     pub nvars: usize,
+    /// Total number of ordered pairs, `nvars * nvars`.
     pub nord_pairs: usize,
+    /// `about` index of each pair (length = no. of pairs on this rank).
     pub about: Vec<IntT>,
+    /// `by` index of each pair, parallel to [`Self::about`].
     pub by: Vec<IntT>,
+    /// Per-pair length of the `si` / `lmr` slice (equal to
+    /// `hist_dim[about]`).
     pub sizes: Vec<IntT>,
+    /// Optional concatenated specific-information payload; the slice
+    /// for pair `i` has length `sizes[i]`.
     pub si: Option<Array1<FloatT>>,
+    /// Concatenated LMR payload; the slice for pair `i` has length
+    /// `sizes[i]`.
     pub lmr: Array1<FloatT>,
 }
 
@@ -416,6 +603,13 @@ where
     IntT: Clone + Default + Debug + Equivalence + FromToPrimitive,
     FloatT: Clone + Default + Debug + Equivalence + Zero,
 {
+    /// Flatten a slice of [`OrdPairSI`] records into an
+    /// [`OrdPairSICollection`] over an `nvars x nvars` ordered pair
+    /// space.
+    ///
+    /// Concatenates the per-pair `lmr` vectors into [`Self::lmr`].
+    /// If every record carries an `si` payload, the `si` slices are
+    /// also concatenated; otherwise [`Self::si`] is `None`.
     pub fn from_vec(
         nvars: usize,
         vdata: &[OrdPairSI<IntT, FloatT>],
@@ -459,6 +653,14 @@ where
         }
     }
 
+    /// Re-shuffle the collection across MPI ranks so that each
+    /// `(about, by)` pair lands on its block-distributed owner of the
+    /// flattened grid of (`nvars x nvars`) pairs .
+    ///
+    /// Computes the per-destination send counts from
+    /// [`block_owner`] applied to `about * nvars + by`, then issues
+    /// paired [`all2all_vec`] / [`all2allv_vec`] exchanges for the
+    /// pair indices, sizes, and the `si` / `lmr` payloads. 
     pub fn distribute(&self, mcx: &CommIfx) -> Result<Self> {
         let s_timer = SectionTimer::from_comm(mcx.comm(), ",");
         let np = mcx.size as usize;
@@ -518,6 +720,13 @@ where
         })
     }
 
+    /// Build a `pair_index -> (slot_index, payload_offset)` lookup
+    /// over the records currently held on this rank.
+    ///
+    /// The returned map keys each `about * nvars + by` to its
+    /// position in [`Self::about`] / [`Self::by`] / [`Self::sizes`]
+    /// and to the matching offset in [`Self::si`] / [`Self::lmr`].
+    /// Used by [`Self::fill_diag`].
     fn pairs_lookup(&self) -> HashMap<usize, (usize, usize)> {
         let mut p_lookup =
             HashMap::<usize, (usize, usize)>::with_capacity(self.about.len());
@@ -534,6 +743,18 @@ where
         p_lookup
     }
 
+    /// Re-key the collection so that this rank owns the contiguous
+    /// block-distributed range of the `nvars x nvars` ordered pair
+    /// grid, leaving diagonal entries (`about == by`) zeroed.
+    ///
+    /// Replaces [`Self::about`], [`Self::by`], [`Self::sizes`] and
+    /// the `si` / `lmr` payloads with a freshly allocated layout
+    /// covering [`block_range`]`(rank, size, nord_pairs)`. Off-diagonal
+    /// pairs whose data are present in the previous layout (located via
+    /// [`Self::pairs_lookup`]) are copied over; everything else (in
+    /// particular every `about == by` slot) is left as the default
+    /// value. `hist_dim` provides the per-`about` slice length used
+    /// to size each pair.
     pub fn fill_diag(&mut self, hist_dim: &[IntT], mcx: &CommIfx) {
         //  Initialize array with the allocated ordered pairs
         let brg = block_range(mcx.rank, mcx.size, self.nord_pairs);
@@ -587,20 +808,32 @@ where
 }
 
 // aliases to
+/// Result of computing one pair of variables: two [`OrdPairSI`] records
+/// (one for each direction of the ordered pair) plus the corresponding
+/// [`PairMI`] entry.
 pub(super) type NodePair<IntT, FloatT> = (
     OrdPairSI<IntT, FloatT>,
     OrdPairSI<IntT, FloatT>,
     PairMI<IntT, FloatT>,
 );
 
+/// Per-batch accumulator of [`NodePair`] results: parallel `Vec`s of
+/// the two ordered SI directions and the corresponding MI records.
+/// Implements [`BPTrait`] for ergonomic batch construction.
 pub(super) type BatchPairs<IntT, FloatT> = (
     Vec<OrdPairSI<IntT, FloatT>>,
     Vec<OrdPairSI<IntT, FloatT>>,
     Vec<PairMI<IntT, FloatT>>,
 );
 
+/// Trait implemented by [`BatchPairs`] to expose a uniform
+/// `new` / `push` interface for accumulating [`NodePair`] results
+/// during a 2-D pair batch.
 pub(super) trait BPTrait<IntT, FloatT> {
+    /// Pre-allocate a batch sized for the upper-triangular pairs in
+    /// the `(rows, cols)` rectangle (`row < col`).
     fn new(rows: Range<usize>, cols: Range<usize>) -> Self;
+    /// Append one [`NodePair`] result to the batch.
     fn push(&mut self, node_pair: NodePair<IntT, FloatT>);
 }
 
@@ -624,6 +857,10 @@ impl<IntT, FloatT> BPTrait<IntT, FloatT> for BatchPairs<IntT, FloatT> {
     }
 }
 
+/// Collection-level analogue of [`NodePair`]: an
+/// [`OrdPairSICollection`] holding the ordered SI / LMR data paired
+/// with a [`PairMICollection`] holding the matching MI / joint
+/// histograms.
 pub(super) type NodePairCollection<IntT, FloatT> = (
     OrdPairSICollection<IntT, FloatT>,
     PairMICollection<IntT, FloatT>,

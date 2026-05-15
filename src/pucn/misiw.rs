@@ -1,3 +1,37 @@
+//! Driver for the MISI workflows 
+//! (computes Mutual Information / Specific Information / LMR) 
+//! in [`crate::pucn`].
+//!
+//! [`MISIWorkFlow`] is a light-weight struct that bundles the MPI
+//! communicator interface, the pair-work distributor, the parsed
+//! [`WorkflowArgs`], the source AnnData, and a cumulative IO timer.
+//! It implements [`MISIWorkFlowTrait`] that uses the stateless helpers in
+//! [`crate::pucn::helpers::MISIWorkFlowHelper`] to build the MI/SI/LMR
+//! data containers.
+//!
+//! The struct exposes one method per [`crate::pucn::RunMode`] it can
+//! handle:
+//!
+//! * [`MISIWorkFlow::run`] — full pipeline ([`RunMode::MISI`](crate::pucn::RunMode::MISI)):
+//!   construct nodes (or reload them from `hist_data_file`), build
+//!   per-pair MI / SI / LMR vectors in batches, distribute, and
+//!   save to disk.
+//! * [`MISIWorkFlow::run_hist_nodes`] — only construct the
+//!   per-variable [`NodeCollection`]
+//!   ([`RunMode::HistNodes`](crate::pucn::RunMode::HistNodes)) and 
+//!   save to disk.
+//! * [`MISIWorkFlow::run_hist`] — construct nodes plus the joint
+//!   histograms ([`PairMICollection`]) 
+//!   ([`RunMode::HistDist`](crate::pucn::RunMode::HistDist))
+//!   and save to disk.
+//! * [`MISIWorkFlow::run_misi_dist`] — load nodes and joint
+//!   histograms from disk, compute MI / SI / LMR, distribute, and
+//!   save to disk ([`RunMode::MISIDist`](crate::pucn::RunMode::MISIDist)).
+//! * [`MISIWorkFlow::run_misi_dist_from_nodes`] — load only the
+//!   nodes from disk, recompute the histograms in-process, and then
+//!   continue with the MI / SI / LMR step
+//!   ([`RunMode::HistNodes2MISI`](crate::pucn::RunMode::HistNodes2MISI)).
+
 use std::path::Path;
 
 use anyhow::{Ok, Result};
@@ -17,11 +51,24 @@ use crate::{
 };
 
 
+/// Runtime context for execution of the MISI workflows.
+///
+/// Includes references to the MPI communicator wrapper, work distributor, 
+/// parsed configuration, AnnData. Also has a cumulative IO timer for the
+/// duration of one workflow run.
 pub struct MISIWorkFlow<'a> {
+    /// MPI communicator wrapper used by every collective call.
     pub mpi_ifx: &'a CommIfx,
+    /// Pair-work distributor describing 
+    /// (a) the per-rank block distribution of the variable and
+    /// (b) the 2-D tiles of the pair grid.
     pub wdistr: &'a PairWorkDistributor,
+    /// Parsed workflow configuration.
     pub args: &'a WorkflowArgs,
+    /// Source AnnData expression file.
     pub adata: &'a AnnData,
+    /// Cumulative IO timer; the helpers add elapsed read/write time
+    /// to it on every parallel-IO call.
     pub io_timer: CumulativeTimer<'a>,
 }
 
@@ -52,6 +99,18 @@ impl<'a> MISIWorkFlowTrait<'a> for MISIWorkFlow<'a> {
 }
 
 impl<'a> MISIWorkFlow<'a> {
+    /// Distribute and save to distk a previously computed
+    /// `(NodeCollection, OrdPairSICollection, PairMICollection)`
+    /// triple to the workflow's MISI HDF5 file.
+    ///
+    /// The MI and SI/LMR collections are first re-shuffled across
+    /// ranks (skipped when running on a single rank) so that each
+    /// rank holds its block of the global pair space. 
+    /// The SI collection is then expanded to fill the diagonal entries 
+    /// before serialization. 
+    /// Rank 0 writes the [`NodeCollection`], and every rank participates in
+    /// the parallel-IO pair-data write
+    /// ([`MISIWorkFlowHelper::write_node_pairs`]).
     fn save_distribute(
         &self,
         nodes: NodeCollection<i64, i32, f32>,
@@ -126,6 +185,17 @@ impl<'a> MISIWorkFlow<'a> {
         Ok(())
     }
 
+    /// Run the full MISI pipeline
+    /// ([`RunMode::MISI`](crate::pucn::RunMode::MISI)).
+    ///
+    /// Reuses a saved [`NodeCollection`] from
+    /// [`WorkflowArgs::hist_data_file`] when that file exists,
+    /// otherwise constructs it via
+    /// [`MISIWorkFlowHelper::construct_nodes`].  
+    /// Builds the per-pair MI / SI / LMR records in batches with
+    /// [`MISIWorkFlowHelper::construct_node_pairs_in_batches`],
+    /// after which the results are distributed and 
+    /// saved ([`Self::save_distribute`]).
     pub fn run(&self) -> Result<()> {
         type HelperT = MISIWorkFlowHelper<i64, i32, f32>;
         let s_timer = SectionTimer::from_comm(self.mpi_ifx.comm(), ",");
@@ -170,6 +240,14 @@ impl<'a> MISIWorkFlow<'a> {
         Ok(())
     }
 
+    /// Construct only the per-variable
+    /// [`NodeCollection`] and save to disk
+    /// ([`RunMode::HistNodes`](crate::pucn::RunMode::HistNodes)).
+    ///
+    /// Used to pre-compute the Bayesian-blocks histograms once and
+    /// reuse them across subsequent runs (the file is read by
+    /// [`Self::run_misi_dist`] and [`Self::run_misi_dist_from_nodes`]).
+    /// NOTE:: Rank 0 writes [`WorkflowArgs::hist_data_file`].
     pub fn run_hist_nodes(&self) -> Result<()> {
         type HelperT = MISIWorkFlowHelper<i64, i32, f32>;
         let s_timer = SectionTimer::from_comm(self.mpi_ifx.comm(), ",");
@@ -196,6 +274,15 @@ impl<'a> MISIWorkFlow<'a> {
         Ok(())
     }
 
+    /// Construct nodes plus the joint histograms
+    /// ([`PairMICollection`]) and save them on disk to
+    /// [`WorkflowArgs::hist_data_file`]
+    /// ([`RunMode::HistDist`](crate::pucn::RunMode::HistDist)).
+    ///
+    /// Distributes the pairs across ranks for construction. 
+    /// Rank 0 writes the [`NodeCollection`]; every rank participates in 
+    /// the parallel-IO write of joint histograms
+    /// ([`MISIWorkFlowHelper::write_hist_pairs`]).
     pub fn run_hist(&self) -> Result<()> {
         type HelperT = MISIWorkFlowHelper<i64, i32, f32>;
         let s_timer = SectionTimer::from_comm(self.mpi_ifx.comm(), ",");
@@ -267,6 +354,13 @@ impl<'a> MISIWorkFlow<'a> {
         Ok(())
     }
 
+    /// Construct MI / SI / LMR, then  distribute and  save to disk.
+    ///
+    /// Calls [`MISIWorkFlowHelper::construct_lmr_node_pairs`] on the
+    /// supplied joint-histogram collection. When a vaild
+    /// [`NodePairCollection`](crate::pucn::ds::NodePairCollection),
+    /// result is returnted, distribute and save with
+    /// [`Self::save_distribute`].
     fn run_misi_dist_from_hist(
         &self,
         nodes: NodeCollection<i64, i32, f32>,
@@ -296,6 +390,14 @@ impl<'a> MISIWorkFlow<'a> {
         }
     }
 
+    /// Run the distributed MI / SI / LMR step from a fully
+    /// pre-computed histogram file
+    /// ([`RunMode::MISIDist`](crate::pucn::RunMode::MISIDist)).
+    ///
+    /// Both the [`NodeCollection`] and the
+    /// [`PairMICollection`] (joint histograms) are loaded from the
+    /// [`WorkflowArgs::hist_data_file`]. 
+    /// Panices if [`WorkflowArgs::lmr_only`] is `true`.
     pub fn run_misi_dist(&self) -> Result<()> {
         type HelperT = MISIWorkFlowHelper<i64, i32, f32>;
         cond_info!(self.mpi_ifx.is_root(); "Starting MISIWorkFlow::Run MISI Dist");
@@ -342,6 +444,19 @@ impl<'a> MISIWorkFlow<'a> {
         Ok(())
     }
 
+    /// Run the distributed MI / SI / LMR step starting from a
+    /// nodes-only histogram file
+    /// ([`RunMode::HistNodes2MISI`](crate::pucn::RunMode::HistNodes2MISI)).
+    ///
+    /// Loads only the [`NodeCollection`] from
+    /// [`WorkflowArgs::hist_data_file`], rebuilds the joint histograms
+    /// in-process via
+    /// [`MISIWorkFlowHelper::construct_hist_node_pairs`], distributes
+    /// them across ranks, and then delegates to
+    /// [`Self::run_misi_dist_from_hist`]. 
+    /// Useful when the
+    /// nodes-only file produced by [`Self::run_hist_nodes`] is reused
+    /// without persisting the (much larger) joint histograms.
     pub fn run_misi_dist_from_nodes(&self) -> Result<()> {
         type HelperT = MISIWorkFlowHelper<i64, i32, f32>;
         cond_info!(self.mpi_ifx.is_root(); "Starting MISIWorkFlow::Run MISI Dist from Nodes");
