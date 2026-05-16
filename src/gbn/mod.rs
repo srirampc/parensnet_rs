@@ -1,3 +1,42 @@
+//! Gradient-boosted gene-regulatory-network (GRN) construction.
+//!
+//! This module re-implements the GRNBoost approach of Moerman et al.
+//! (Arboreto, 2019) on top of [LightGBM](https://lightgbm.readthedocs.io/)
+//! via the [`lightgbm3`] crate, with two extensions targeting large
+//! single-cell datasets:
+//!
+//! 1. A **cross-validation step** ([`cv`]) that estimates a single
+//!    "good enough" boosting-round count by running k-fold CV with
+//!    early stopping on a randomly sampled subset of target genes.
+//!    The median of the per-fold best-iteration values is used as
+//!    the `num_iterations` for the production run.
+//! 2. An **MPI-distributed training loop** ([`arbor`]) that block-
+//!    distributes the target genes across ranks, trains one LightGBM
+//!    regressor per target on the transcription-factor (TF) matrix,
+//!    extracts gain-based feature importances, and gathers the
+//!    resulting `(tf, target, importance)` edges into an HDF5 file.
+//!
+//! # Submodules
+//! * [`args`] — YAML/TOML-deserializable configuration types
+//!   ([`GBGRNArgs`], [`GBMParams`], [`CVConfig`], [`RunMode`]).
+//! * [`train`] — thin wrappers around [`lightgbm3::Booster`] for
+//!   plain training and training with early stopping, both for raw
+//!   `ndarray` views and for [`AnnData`] columns.
+//! * [`cv`] — k-fold cross-validation utilities ([`cv_gbm`],
+//!   [`mpi_cv_gbm`], [`CVStats`]) used to pick `num_iterations`.
+//! * [`arbor`] — feature-importance extraction, the per-rank
+//!   target-gene loop, and HDF5 output ([`TFOutEdge`],
+//!   [`mpi_gradient_boosting_grn`], [`mpi_write_h5`]).
+//!
+//! # Public entry points
+//! * [`run_cross_fold_gbm`] — load the AnnData / TF set and run only
+//!   the CV stage, returning the resulting [`CVStats`] (corresponds
+//!   to [`RunMode::GBCrossFoldValidation`]).
+//! * [`infer_gb_network`] — full GRN inference pipeline: optional CV
+//!   step (skipped via [`GBGRNArgs::skip_cv`]) followed by the
+//!   distributed gradient-boosting run and HDF5 write
+//!   (corresponds to [`RunMode::GBGRNet`]).
+
 use anyhow::{Ok, Result};
 use mpi::traits::CommunicatorCollectives;
 
@@ -24,6 +63,10 @@ pub use arbor::{
     mpi_gradient_boosting_grn, mpi_write_h5, write_h5,
 };
 
+/// Internal helper: run [`mpi_cv_gbm`] for the supplied TF gene set
+/// using a [`CVConfig`] derived from `args`.
+///
+/// Forces `verbose = 0` on [`GBMParams`] so the CV pass doesn't flood the log.
 fn mpi_cv_gbn_for(
     tf_set: &GeneSetAD<f32>,
     args: &GBGRNArgs,
@@ -58,6 +101,8 @@ fn mpi_cv_gbn_for(
     Ok(cv_stats)
 }
 
+/// Run only the cross-validation stage of the GBN workflow and
+/// return the per-target [`CVStats`].
 pub fn run_cross_fold_gbm(args: &GBGRNArgs, mcx: &CommIfx) -> Result<CVStats> {
     cond_info!(mcx.is_root(); "Data H5AD : {}", args.h5ad_file);
     let adata = AnnData::new(&args.h5ad_file, Some(args.gene_id_col.clone()), None)?;
@@ -68,6 +113,22 @@ pub fn run_cross_fold_gbm(args: &GBGRNArgs, mcx: &CommIfx) -> Result<CVStats> {
     mpi_cv_gbn_for(&tf_set, args, mcx)
 }
 
+/// Run the full distributed GBN inference pipeline.
+///
+/// Pipeline:
+/// 1. Load the AnnData expression file and the TF gene set.
+/// 2. Decide on a boosting-round count: when
+///    [`GBGRNArgs::skip_cv`] is `true`, [`GBGRNArgs::num_iterations`]
+///    is used directly; otherwise [`mpi_cv_gbn_for`] is invoked and
+///    its [`CVStats::median`] is used.
+/// 3. Call [`mpi_gradient_boosting_grn`] (with target-side caching
+///    enabled) to train one regressor per target gene and collect
+///    the [`TFOutEdge`] edges on each rank.
+/// 4. Reduce the per-rank edge counts for logging, then call
+///    [`mpi_write_h5`] to gather and save the network into
+///    [`GBGRNArgs::output_file`].
+///
+/// Corresponds to the [`RunMode::GBGRNet`] dispatch path.
 pub fn infer_gb_network(args: &GBGRNArgs, mcx: &CommIfx) -> Result<()> {
     cond_info!(mcx.is_root(); "Data H5AD : {}", args.h5ad_file);
     let adata = AnnData::new(&args.h5ad_file, Some(args.gene_id_col.clone()), None)?;

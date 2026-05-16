@@ -1,3 +1,19 @@
+//! Thin training wrappers around [`lightgbm3::Booster`].
+//!
+//! Two flavours, each available for both raw `ndarray` views and
+//! [`AnnData`] columns:
+//!
+//! * Plain training over the full feature matrix or an explicit row
+//!   subset ([`train`], [`train_ad`]).
+//! * Training with a held-out validation set and LightGBM's
+//!   early-stopping callback ([`train_with_early_stopping`],
+//!   [`train_with_early_stopping_ad`]).
+//!
+//! All routines round the input data to `n_decimals` digits via
+//! [`crate::util::around`] before constructing the LightGBM
+//! [`Dataset`], matching the rounding used elsewhere in the
+//! pipeline.
+
 use anyhow::Result;
 use lightgbm3::{Booster, Dataset};
 use ndarray::{ArrayView1, ArrayView2, Axis};
@@ -43,6 +59,13 @@ use crate::{anndata::AnnData, util::around};
 //
 // }
 
+/// Train a LightGBM regressor on `(data_matrix, label)` and return
+/// the resulting [`lightgbm3::Booster`].
+///
+/// If `train_idx` is available, the rows it lists are first selected
+/// from `data_matrix` and `label` to form the training set, otherwise 
+/// the full inputs are used as it is.
+/// `params` is forwarded verbatim to [`Booster::train`].
 pub fn train(
     data_matrix: ArrayView2<f32>,
     label: ArrayView1<f32>,
@@ -70,6 +93,11 @@ pub fn train(
     Ok(Booster::train(train_data, params)?)
 }
 
+/// [`AnnData`]-aware variant of [`train`].
+///
+/// Reads the `label_index` column as the training label and the
+/// rows in `train_idx` as the predictor sub-matrix from `adata`,
+/// rounds both arrays to `n_decimals`, then calls [`train`].
 pub fn train_ad(
     adata: &AnnData,
     label_index: usize,
@@ -84,6 +112,16 @@ pub fn train_ad(
     train(x_train.view(), label_train.view(), None, params)
 }
 
+/// [`AnnData`]-aware training with a held-out validation set.
+///
+/// Reads the `label_index` column from `adata`, splits the matrix
+/// rows into `(train_idx, val_idx)` (the two halves of `indices`),
+/// rounds the resulting predictor and label arrays to `n_decimals`
+/// digits, and runs [`Booster::train_with_valid`].
+///
+/// The validation [`Dataset`] is constructed with
+/// [`Dataset::from_slice_with_reference`] so its bin boundaries
+/// match the training set.
 pub fn train_with_early_stopping_ad(
     adata: &AnnData,
     label_index: usize,
@@ -100,7 +138,7 @@ pub fn train_with_early_stopping_ad(
     let label_val = around(label.select(Axis(0), val_idx).view(), n_decimals);
 
     let subdar = x_train.slice(ndarray::s![..5, ..5]);
-    println!("SUBARRAY {:?}", subdar);
+    log::debug!("SUBARRAY {:?}", subdar);
     let train_data = Dataset::from_slice(
         x_train.as_slice().unwrap(),
         label_train.as_slice().unwrap(),
@@ -120,6 +158,16 @@ pub fn train_with_early_stopping_ad(
     Ok(booster)
 }
 
+/// Train a LightGBM regressor with a validation set and the
+/// early-stopping callback configured by `es_params`.
+///
+/// The two halves of `indices` (`train_idx`, `val_idx`) select the
+/// rows of `data_matrix` / `label` that go into the training and
+/// validation [`Dataset`]s respectively. `gb_params` is the standard
+/// LightGBM parameter object and `es_params` includes early-stopping
+/// parameters. Returns the [`Booster`], which  the caller
+/// can use to obtain the early-stopped iteration count via
+/// [`lightgbm3::Booster::num_iterations`].
 pub fn train_with_early_stopping(
     data_matrix: ArrayView2<f32>,
     label: ArrayView1<f32>,

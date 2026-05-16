@@ -1,3 +1,19 @@
+//! GRNBoost-style network constructors and HDF5 writers.
+//!
+//! This module hosts the key functions of the GBN pipeline:
+//!
+//! 1. [`feature_importances`] / [`feature_importances_ad`] that trains a 
+//!    set of targets, running one [`lightgbm3::Booster`] per target gene
+//!    via [`train`] and extracts gain-based feature importances with
+//!    [`get_importances`].
+//! 2. MPI driver [`mpi_gradient_boosting_grn`] that computes the
+//!    block range of targets owned by each rank, optionally caches
+//!    the target expression matrix in a [`GeneSetAD`], and turns the
+//!    importance matrix into a flat [`Array1`] of [`TFOutEdge`].
+//! 3. HDF5 writers [`write_h5`] (single-rank) and [`mpi_write_h5`]
+//!    (gathers all edges to the root before writing) that emit the
+//!    `/gbnet/{data,target,tf}` datasets.
+
 use std::ops::Range;
 
 use anyhow::{Result, ensure};
@@ -13,19 +29,30 @@ use super::{GBMParams, train};
 use crate::{
     anndata::{AnnData, GeneSetAD},
     comm::CommIfx,
-    //h5::mpio::create_write1d,
     util::block_range,
 };
 
-#[derive(H5Type, Clone, PartialEq, Debug, Default, Equivalence)] // register with HDF5
+/// Single edge of the inferred TF→target network.
+///
+/// Marked `repr(C)` and `H5Type` so it can be written directly as a
+/// compound HDF5 dataset (`/gbnet/data`) and exchanged via MPI as a
+/// single [`Equivalence`] type.
+#[derive(H5Type, Clone, PartialEq, Debug, Default, Equivalence)]
 #[repr(C)]
 pub struct TFOutEdge {
+    /// Index of the source transcription factor in the TF list
+    /// (offset already applied by [`Self::from_matrix`]).
     tf: u32,
+    /// Index of the target gene in the AnnData matrix (offset
+    /// already applied by [`Self::from_matrix`]).
     target: u32,
+    /// Gain-based feature importance produced by LightGBM
+    /// ([`ImportanceType::Gain`]).
     importance: f32,
 }
 
 impl TFOutEdge {
+    /// Direct field-wise constructor.
     pub fn new(tf_id: u32, gene_id: u32, wt: f32) -> Self {
         Self {
             tf: tf_id,
@@ -34,8 +61,13 @@ impl TFOutEdge {
         }
     }
 
-    // Weights matrix is expected of size |Target| x |TF|
-    // Output is a array of {row_index+offset, column_index+offset, wt}
+    /// Convert a `(|target| x |TF|)` importance matrix into a flat
+    /// [`Array1`] of [`TFOutEdge`].
+    ///
+    /// Iterates the matrix in row-major order and emits one edge
+    /// for every strictly positive entry. Row indices 
+    ///  and column indices are shifted by `tf_offset/tgt_offset` so the 
+    ///  resulting `tf` / `target` fields are global gene indices.
     pub fn from_matrix(
         weights_matrix: Array2<f64>,
         tgt_offset: usize,
@@ -59,6 +91,15 @@ impl TFOutEdge {
     }
 }
 
+/// Single-rank writer for the inferred network.
+///
+/// Creates `out_file` and writes three datasets under the `/gbnet`
+/// group:
+///
+/// * `data`  — the [`TFOutEdge`] records (compound HDF5 type).
+/// * `target` — the AnnData gene names (one per target row of the
+///   expression matrix), as variable-length unicode strings.
+/// * `tf`     — the names of the genes referenced by `tf_indices`.
 pub fn write_h5(
     adata: &AnnData,
     tf_indices: &[usize],
@@ -100,6 +141,12 @@ pub fn write_h5(
     Ok(())
 }
 
+/// MPI variant of [`write_h5`].
+///
+/// Gathers every rank's edge slice onto rank 0 with
+/// [`gatherv_full_vec`] and then dispatches to [`write_h5`] there.
+/// Non-root ranks write nothing.
+/// TODO:: The truly-distributed HDF5 writing.
 pub fn mpi_write_h5(
     adata: &AnnData,
     tf_indices: &[usize],
@@ -114,7 +161,7 @@ pub fn mpi_write_h5(
         write_h5(adata, tf_indices, &Array1::from_vec(all_edges), out_file)?;
     }
 
-    // TODO:: the distributed write hangs debug this later
+    // TODO:: the distributed write fails; debug this later
     //let tgt_range = block_range(mcx.rank, mcx.size, adata.genes_ref().len());
     //let tgt_genes: Array1<VarLenUnicode> = Array1::from_vec(
     //    adata.genes_ref()[tgt_range]
@@ -140,6 +187,13 @@ pub fn mpi_write_h5(
     Ok(())
 }
 
+/// Read gain-based feature importances out of a trained
+/// [`lightgbm3::Booster`] and re-align them to the full TF list.
+///
+/// When the target gene is itself in the TF set, the predictor
+/// matrix passed to LightGBM had its corresponding column dropped;
+/// this function inserts a zero importance at the missing TF index
+/// so the returned vector has length [`GeneSetAD::len`] regardless.
 fn get_importances(
     tf_set: &GeneSetAD<f32>,
     tgt_id: usize,
@@ -173,6 +227,11 @@ fn get_importances(
     Ok(updated_importances)
 }
 
+/// Train one LightGBM regressor predicting the target's expression
+/// vector from the TF expression matrix.
+///
+/// When the target is one of the TFs, use a submatrix that drops that column
+/// from the predictors so the model; Otherwise the full matrix is used.
 fn train_for_target(
     tf_set: &GeneSetAD<f32>,
     tgt_label: ArrayView1<f32>,
@@ -195,6 +254,13 @@ fn train_for_target(
     Ok(t_booster)
 }
 
+/// Compute the `(|tgt_range| x |TF|)` importance matrix for a
+/// contiguous range of targets, reading labels from a [`GeneSetAD`] cache.
+///
+/// For each `tgt_idx` in `tgt_range` the corresponding column of
+/// `tgt_set` is the regression label and the importances returned
+/// by [`get_importances`] populate row `tgt_idx - tgt_range.start`
+/// of the output matrix.
 pub fn feature_importances(
     tf_set: &GeneSetAD<f32>,
     tgt_set: &GeneSetAD<f32>,
@@ -216,6 +282,13 @@ pub fn feature_importances(
     Ok(tgt_importances)
 }
 
+/// Compute the `(|tgt_range| x |TF|)` importance matrix for a
+/// contiguous range of targets, reading labels from `adata`.
+///
+/// For each `tgt_idx` in `tgt_range` the corresponding column of
+/// `tgt_set` is the regression label and the importances returned
+/// by [`get_importances`] populate row `tgt_idx - tgt_range.start`
+/// of the output matrix.
 pub fn feature_importances_ad(
     tf_set: &GeneSetAD<f32>,
     adata: &AnnData,
@@ -237,6 +310,14 @@ pub fn feature_importances_ad(
     Ok(tgt_importances)
 }
 
+/// Distributed driver of the GBN inference loop.
+///
+/// Computes the rank's contiguous block of target genes,
+/// runs either [`feature_importances`] (when `cache_tgt` is `true`, 
+/// with the target columns pre-loaded into a temporary [`GeneSetAD`]) or
+/// [`feature_importances_ad`] (otherwise), and returns the
+/// resulting importances as a flat [`Array1`] of [`TFOutEdge`]s.
+/// NOTE:: The returned array contains only this rank's edges.
 pub fn mpi_gradient_boosting_grn(
     tf_set: &GeneSetAD<f32>,
     mpi_ifx: &CommIfx,

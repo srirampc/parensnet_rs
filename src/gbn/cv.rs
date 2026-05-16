@@ -1,3 +1,21 @@
+//! Cross-validation utilities for picking a boosting-round count.
+//!
+//! The CV stage trains one LightGBM model per `(target gene, fold)`
+//! pair via [`train_with_early_stopping`], records the early-stopped
+//! iteration count, and aggregates the counts into a [`CVStats`].
+//! The median of the recorded counts is then used as the
+//! `num_iterations` for the production GBN run.
+//!
+//! Two entry points are exposed:
+//! * [`cv_gbm`] runs the loop sequentially on a single rank.
+//! * [`mpi_cv_gbm`] block-distributes the `(gene, fold)` runs across
+//!   MPI ranks (see the [`DistCVConfig`] helper) and gathers the
+//!   results with [`allgatherv_full_vec`].
+//!
+//! Both share [`cross_validate_target`], which performs the per-gene
+//! K-fold loop, and [`KFold`], which shuffles a row index vector and
+//! emits the train/validation split for a given fold.
+
 use anyhow::Result;
 use mpi::traits::CommunicatorCollectives;
 use ndarray::{ArrayView1, ArrayView2};
@@ -14,13 +32,22 @@ use crate::{
     util::{Vec2d, block_high, block_low, block_range},
 };
 
-// K-Fold Cross-Validation
+/// Sklearn-style K-fold splitter used by the CV loops.
+///
+/// Owns a (possibly shuffled) row index vector and turns it into
+/// `(train_indices, val_indices)` pairs on demand via
+/// [`Self::split_for`] / [`Self::split`].
 struct KFold {
+    /// Number of folds (matches [`CVConfig::n_folds`]).
     n_splits: usize,
+    /// Permuted row indices (`0..ndata`) shared by every fold.
     indices: Vec<usize>,
 }
 
 impl KFold {
+    /// Build a [`KFold`] over `0..ndata` rows split into
+    /// `n_splits` folds. When `shuffle == true` the row indices are
+    /// permuted so each call returns a different CV partition.
     pub fn new(ndata: usize, n_splits: usize, shuffle: bool) -> Self {
         let mut indices: Vec<usize> = (0..ndata).collect();
 
@@ -32,23 +59,11 @@ impl KFold {
         Self { n_splits, indices }
     }
 
-    //NOTE::  distributed KFold functionality is in the DistCVConfig
-    //pub fn new_dist(
-    //    ndata: usize,
-    //    n_splits: usize,
-    //    shuffle: bool,
-    //    mpi_ifx: &CommIfx,
-    //) -> Result<Self> {
-    //    let mut indices: Vec<usize> = if mpi_ifx.rank == 0 {
-    //        let kf = Self::new(ndata, n_splits, shuffle);
-    //        kf.indices
-    //    } else {
-    //        vec![0; ndata]
-    //    };
-    //    bcast(&mut indices, 0, mpi_ifx.comm())?;
-    //    Ok(Self { n_splits, indices })
-    //}
 
+    /// Return the `(train_indices, val_indices)` for the given `fold`.
+    ///
+    /// The validation slice is the fold-th block with in the `indices` and
+    /// the training slice is the rest.
     pub fn split_for(&self, fold: usize) -> (Vec<usize>, Vec<usize>) {
         let val_range =
             block_range(fold as i32, self.n_splits as i32, self.indices.len());
@@ -66,12 +81,19 @@ impl KFold {
         (train_indices, val_indices)
     }
 
+    /// Return the `(train, val)` splits for all `n_splits` fold.
     pub fn split(&self) -> Vec<(Vec<usize>, Vec<usize>)> {
         (0..self.n_splits).map(|x| self.split_for(x)).collect()
     }
 }
 
-// Cross-Validation for One Target Gene
+/// Run K-fold CV with early stopping for one target gene and return
+/// the early-stopped iteration count of every fold.
+///
+/// Builds a fresh shuffled [`KFold`] over `data_matrix.nrows()`,
+/// then trains [`config.n_folds`](CVConfig::n_folds) boosters. 
+/// Each booster uses the LightGBM JSON parameters derived from 
+/// `config.params`. The early-stopping callback uses [`CVConfig::es_params`].
 pub fn cross_validate_target(
     data_matrix: ArrayView2<f32>,
     label: ArrayView1<f32>,
@@ -104,13 +126,29 @@ pub fn cross_validate_target(
     Ok(best_iterations)
 }
 
+/// Aggregated statistics over the early-stopped iteration counts
+/// returned by [`cross_validate_target`] across every sampled gene
+/// and fold.
+///
+/// Holds the raw counts, a sorted copy, and the basic order
+/// statistics used to summarise the CV pass.
 pub struct CVStats {
+    /// Raw per-(gene, fold) iteration counts laid out as a
+    /// `(n_sample_genes, n_folds)` [`Vec2d`].
     pub all_rounds: Vec2d<usize>,
+    /// Same counts as a sorted flat vector (used for percentile
+    /// queries and the `Range` line of [`CVStats::print`]).
     pub sorted_rounds: Vec<usize>,
+    /// Mean of [`Self::all_rounds`].
     pub mean: f64,
+    /// Population standard deviation of [`Self::all_rounds`].
     pub stdev: f64,
+    /// Median iteration count; consumed by
+    /// [`crate::gbn::infer_gb_network`] as `num_iterations`.
     pub median: usize,
+    /// 25th percentile of [`Self::sorted_rounds`].
     pub p25: usize,
+    /// 75th percentile of [`Self::sorted_rounds`].
     pub p75: usize,
 }
 
@@ -133,6 +171,11 @@ impl Display for CVStats {
 }
 
 impl CVStats {
+    /// Compute the order statistics of `all_rounds` and initialize
+    /// [`CVStats`].
+    ///
+    /// NOTE:: `all_rounds` is expected to contain
+    /// `n_sample_genes * n_folds` entries laid out gene-major .
     pub fn new(
         all_rounds: Vec<usize>,
         n_sample_genes: usize,
@@ -165,6 +208,9 @@ impl CVStats {
             p75,
         }
     }
+
+    /// Print the CV stats in a multi-line, human-readable format.
+    /// The single-line `Display` impl is used for log lines.
     pub fn print(&self) {
         println!("\n=== Cross-Validation Results ===");
         println!("CV Mean rounds: {}", self.mean);
@@ -178,6 +224,12 @@ impl CVStats {
     }
 }
 
+/// Single-rank cross-validation.
+///
+/// Randomly samples [`CVConfig::n_sample_genes`] target genes from
+/// `adata`, then for each one calls [`cross_validate_target`] using
+/// the TF expression matrix of `tf_set` as predictors.
+/// Aggregates every per-fold iteration count, returns them  as [`CVStats`].
 pub fn cv_gbm(
     adata: &AnnData,
     tf_set: &GeneSetAD<f32>,
@@ -220,16 +272,45 @@ pub fn cv_gbm(
     ))
 }
 
+/// Per-rank state for the distributed CV loop in [`mpi_cv_gbm`].
+///
+/// Includes: 
+/// * Reference to a [`CVConfig`] object;
+/// * the rank's slice of the global `(sampled_gene, fold)` run
+///   list, expressed as a contiguous `Range<usize>` over
+///   `0..n_sample_genes * n_folds` (one run per element);
+/// * a [`KFold`] cache used to share splits with the previous rank 
+///   so that runs straddling a rank boundary use identical row permutations.
 struct DistCVConfig<'a> {
+    /// Number of observations (rows of the expression matrix).
     ndata: usize,
+    /// Total number of `(gene, fold)` runs in the global loop
+    /// (`n_sample_genes * n_folds`); kept for diagnostics.
     _nruns: usize,
+    /// Half-open run-index range owned by this rank.
     p_range: Range<usize>,
+    /// Borrowed CV configuration.
     config: &'a CVConfig,
+    /// `(sample_id, kfold)` pair for the sample currently being
+    /// processed. Wrapped in [`RefCell`] so [`Self::fold_split_for`]
+    /// can re-key it when crossing a sample boundary.
     current_sample_kfold: RefCell<(usize, KFold)>,
+    /// `(sample_id, kfold)` pair for the rank's last sample. Built
+    /// once at construction time and shifted to the next rank so
+    /// the boundary sample is processed with identical splits on
+    /// both sides.
     last_sample_kfold: (usize, KFold),
 }
 
 impl<'a> DistCVConfig<'a> {
+    /// Build the per-rank state.
+    ///
+    /// Computes the rank's range of fold-runs  among
+    /// `n_sample_genes * n_folds` possible fold-runs,
+    /// constructs the rank's `last_sample` [`KFold`] , and
+    /// uses [`right_shift_vec`] to pull the previous rank's last
+    /// `KFold` indices into this rank's `current_sample_kfold` when
+    /// the two sample IDs match.
     fn new(ndata: usize, config: &'a CVConfig, cifx: &CommIfx) -> Self {
         let nruns = config.n_sample_genes * config.n_folds;
         let prev_last_sample = if cifx.rank > 0 {
@@ -274,22 +355,27 @@ impl<'a> DistCVConfig<'a> {
         }
     }
 
+    /// Total number of `(gene, fold)` runs in the global loop.
     fn _n_runs(&self) -> usize {
         self._nruns
     }
 
+    /// Map a global `run_id` to the index of its sampled gene.
     fn sample_id(&self, run_id: usize) -> usize {
         run_id / self.config.n_sample_genes
     }
 
+    /// Map a global `run_id` to its fold index.
     fn fold_id(&self, run_id: usize) -> usize {
         run_id % self.config.n_folds
     }
 
+    /// Half-open run-index range owned by this rank.
     fn run_range(&self) -> Range<usize> {
         self.p_range.clone()
     }
 
+    /// Get the sample IDs corresponding to each run in `r_runs` range
     fn run_samples(&self, r_runs: Range<usize>) -> Vec<usize> {
         r_runs
             .clone()
@@ -297,12 +383,18 @@ impl<'a> DistCVConfig<'a> {
             .collect()
     }
 
+    /// Unique Sample IDs touched by this rank's [`Self::run_range`], with
+    /// neighbouring duplicates collapsed
+    /// (the run list is gene-major so duplicates are always contiguous).
     fn run_samples_dedup(&self) -> Vec<usize> {
         let mut rgenes = self.run_samples(self.run_range());
         rgenes.dedup();
         rgenes
     }
 
+    /// Randomly pick [`CVConfig::n_sample_genes`] indices from
+    /// `0..n_genes` (without replacement). Local to the rank; use
+    /// [`Self::dist_sample_genes`] for the broadcast variant.
     fn sample_genes(&self, n_genes: usize) -> Vec<usize> {
         let mut rng = rand::rng();
         let mut var_indices: Vec<usize> = (0..n_genes).collect();
@@ -313,6 +405,9 @@ impl<'a> DistCVConfig<'a> {
             .collect()
     }
 
+    /// Generate the sampled-gene list on the root rank and broadcast
+    /// it to every rank. Returns an [`Vec`] of length
+    /// [`CVConfig::n_sample_genes`].
     fn dist_sample_genes(
         &self,
         n_genes: usize,
@@ -327,6 +422,7 @@ impl<'a> DistCVConfig<'a> {
         Ok(s_genes)
     }
 
+    /// Construct the [`GBMParams`] used by every CV booster.
     fn gbm_params(&self) -> GBMParams {
         GBMParams {
             early_stopping_rounds: self.config.early_stopping_rounds,
@@ -335,13 +431,21 @@ impl<'a> DistCVConfig<'a> {
         }
     }
 
+    /// Return the `(train, val)` split for the given global `run_id`.
+    ///
+    /// Reuses the cached [`KFold`] when `run_id` belongs to either
+    /// the rank's `last_sample` or the currently active sample.
+    /// Otherwise builds a fresh [`KFold`] and updates the
+    /// `current_sample_kfold` cache.
     fn fold_split_for(&self, run_id: usize) -> (Vec<usize>, Vec<usize>) {
         let sample_id: usize = self.sample_id(run_id);
         let fold_id: usize = self.fold_id(run_id);
-        if sample_id == self.last_sample_kfold.0 {
-            self.last_sample_kfold.1.split_for(fold_id)
-        } else if sample_id == self.current_sample_kfold.borrow().0 {
-            self.current_sample_kfold.borrow().1.split_for(fold_id)
+        let current = self.current_sample_kfold.borrow();
+        let last = &self.last_sample_kfold;
+        if sample_id == last.0 {
+            last.1.split_for(fold_id)
+        } else if sample_id == current.0 {
+            current.1.split_for(fold_id)
         } else {
             self.current_sample_kfold.replace((
                 sample_id,
@@ -351,12 +455,21 @@ impl<'a> DistCVConfig<'a> {
         }
     }
 
+    /// Forward to [`CVConfig::es_params`].
     fn es_params(&self) -> serde_json::Value {
         self.config.es_params()
     }
 }
 
-// Cross-Validation for One Target Gene
+/// Per-rank CV loop driven by a [`DistCVConfig`].
+///
+/// Iterates over [`DistCVConfig::run_range`], reads the matching
+/// target column from `run_tgt_set` (which contains only the genes
+/// touched by this rank), and trains one [`Booster`] per run with
+/// [`train_with_early_stopping`] using the predictors from
+/// `tf_set`. 
+/// Returns the per-run early-stopped iteration counts in the same
+/// order as the runs.
 fn dist_cross_validate(
     tf_set: &GeneSetAD<f32>,
     run_tgt_set: &GeneSetAD<f32>,
@@ -399,6 +512,14 @@ fn dist_cross_validate(
     Ok(best_iterations)
 }
 
+/// Distributed cross-validation.
+///
+/// Block-distributes the global `(sampled_gene, fold)` runs across
+/// the MPI ranks (see [`DistCVConfig`]), pre-loads the target
+/// columns each rank will read into a small [`GeneSetAD`] cache,
+/// runs [`dist_cross_validate`] locally, and finally
+/// [`allgatherv_full_vec`]s the per-rank iteration counts before
+/// wrapping them into a [`CVStats`].
 pub fn mpi_cv_gbm(
     tf_set: &GeneSetAD<f32>,
     config: &CVConfig,
