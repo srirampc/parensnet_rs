@@ -1,3 +1,16 @@
+//! `pucgrn_cli` — MPI front-end for the parallel PUC workflow.
+//!
+//! Thin command-line wrapper around
+//! [`parensnet_rs::pucn::execute_workflow`]. Parses a single YAML
+//! config file into a [`WorkflowArgs`], fills in the AnnData
+//! matrix dimensions, and dispatches the
+//! ordered list of stages declared in
+//! [`parensnet_rs::pucn::WorkflowArgs::mode`] (histograms, MI/SI,
+//! sampled / LMR / distributed PUC, ...).
+//!
+//! Designed to be launched via `mpirun`/`srun`; each rank reads the
+//! same config file and participates in the collective workflow.
+
 use anyhow::Result;
 use clap::Parser;
 use parensnet_rs::{
@@ -17,8 +30,11 @@ struct CLIArgs {
     config: std::path::PathBuf,
 }
 
+/// Includes parsed CLI args plus the initialised MPI communicator handle.
 struct CLIInit {
+    /// Parsed command-line arguments.
     args: CLIArgs,
+    /// Initialised MPI communicator interface ([`CommIfx`]).
     mpi_ifx: CommIfx,
 }
 
@@ -28,12 +44,15 @@ impl std::fmt::Display for CLIArgs {
     }
 }
 
+/// CLI-level errors.
 #[derive(Error, Debug)]
 enum Error {
+    /// The config file path could not be read on at least one rank.
     #[error("Failed to read {0}")]
     InputReadError(String),
 }
 
+/// Initialise the env logger, the MPI world, and parse the CLI arguments. 
 fn cli_init() -> Result<CLIInit> {
     env_logger::try_init()?;
     let mpi_ifx = CommIfx::init();
@@ -49,6 +68,12 @@ fn cli_init() -> Result<CLIInit> {
     }
 }
 
+/// Workflow Runner entrypoint: load the YAML config, fill in the AnnData
+/// dimensions, and run [`execute_workflow`].
+///
+/// Read failures are detected on every rank and combined with
+/// [`any_of`] so the program aborts collectively when at least one
+/// rank could not open the file.
 fn run(clid: CLIInit) -> Result<()> {
     let mcx = &clid.mpi_ifx;
     cond_info!(mcx.is_root(); "Command Line Arguments : {}", clid.args);

@@ -1,3 +1,69 @@
+//! `parensnet_rs` — distributed gene-network construction toolkit.
+//!
+//! The crate provides MPI-parallel implementations of several
+//! gene-regulatory-network (GRN) construction methods over
+//! single-cell expression matrices stored in AnnData (`.h5ad`)
+//! format. The modules are organised into three broad groups:
+//!
+//! # Network construction workflows
+//!
+//! Each of these modules exposes a YAML/TOML-configurable
+//! `execute_workflow` (or equivalent) entry point that dispatches
+//! over a list of stages and writes the resulting network to HDF5.
+//!
+//! * [`pucn`] — PUC Network pipeline: builds per-variable histograms
+//!   (Bayesian-blocks or fixed-width), computes pairwise MI / SI /
+//!   LMR data, and runs the PUC redundancy scoring of Chan et al.,
+//!   2017. Supports sampled, LMR-based, and fully distributed PUC
+//!   variants ([`pucn::RunMode`]).
+//! * [`gbn`] — GRNBoost-style gradient-boosted GRN inference
+//!   ([`gbn::infer_gb_network`]) based on Arboreto (Moerman et al. ,
+//!   2019). Adds a k-fold cross-validation pass ([`gbn::mpi_cv_gbm`])
+//!   to estimate the boosting-round count before block-distributing
+//!   the per-target [`lightgbm3::Booster`] training across ranks.
+//! * [`mcpn`] — MCPNet B-spline MI workflow: distributes the
+//!   B-spline weight construction and the pairwise MI evaluation
+//!   ([`mcpn::RunMode::MIBSplineWeights`] /
+//!   [`mcpn::RunMode::MIBSpline`]) over MPI and persists the
+//!   results to HDF5.
+//!
+//! # Information-measure kernels
+//!
+//! Low-level math used by the workflows above.
+//!
+//! * [`hist`] — variable-width histogram builders (Bayesian-blocks
+//!   and Knuth's rule) plus the joint-histogram routines used to
+//!   feed the MI / SI estimators.
+//! * [`mvim`] — multi-variable information measures (`I(X;Y)`,
+//!   specific information, Williams–Beer redundancy, LMR), the
+//!   [`mvim::rv::MRVTrait`] abstraction for multi-variable
+//!   distributions, and the HDF5-backed [`mvim::misi`] data
+//!   structures that cache the LMR sorted/prefix-sum tables.
+//! * [`corr`] — B-spline mutual information ([`corr::mi`]) used by
+//!   [`mcpn`]; wraps the C kernels in the bundled `mcpnet_rs`
+//!   crate and provides a pure-Rust reference implementation.
+//!
+//! # I/O, MPI plumbing, and common utilities
+//!
+//! * [`anndata`] — read-side wrapper around AnnData `.h5ad` files
+//!   ([`anndata::AnnData`], [`anndata::GeneSetAD`]) with helpers
+//!   for column selection, sub-matrix loading, and decimal rounding.
+//! * [`h5`] — serial ([`h5::io`]) and MPI-collective
+//!   ([`h5::mpio`]) HDF5 readers and writers used by every workflow
+//!   to load expression matrices and persist intermediate data.
+//! * [`comm`] — [`comm::CommIfx`], the light wrapper around the
+//!   `sope` MPI communicator that carries `rank`, `size`, and the
+//!   underlying [`mpi::topology::SimpleCommunicator`] used by every
+//!   collective in the crate.
+//! * [`util`] — pair / block work distributors
+//!   ([`util::PairWorkDistributor`]), the [`util::Vec2d`] /
+//!   [`util::IdVResults`] containers shared across workflows, and
+//!   miscellaneous slice / file helpers.
+//! * [`types`] — numeric and serde-friendly marker traits
+//!   ([`types::PNInteger`], [`types::PNFloat`], `DiscretizerMethod`,
+//!   `LogBase`) used throughout the crate to keep the workflow
+//!   helpers generic over integer / float widths.
+
 pub mod comm;
 pub mod corr;
 pub mod h5;

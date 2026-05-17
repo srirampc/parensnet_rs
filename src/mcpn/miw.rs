@@ -1,3 +1,22 @@
+//! Batched, MPI-distributed driver for the MCPNet MI kernels.
+//!
+//! Hosts the [`MIWorkFlow`] struct and the generic
+//! [`MIWorkFlowHelper`] that performs the per-rank work:
+//!
+//! * [`MIWorkFlowHelper::construct_bspline_weights`] reads each
+//!   rank's variables out of the AnnData expression matrix,
+//!   evaluates [`bspline_weights`] per column, and returns a
+//!   `(nvars_local, nweights)` matrix.
+//! * [`MIWorkFlowHelper::construct_bspline_mi_pairs`] iterates the
+//!   pair batches, loads the relevant weight rows, and 
+//!   evaluates [`bspline_mi`] on every upper-triangular `(row, col)` pair.
+//! * [`MIWorkFlowHelper::write_weights_h5`] and
+//!   [`MIWorkFlowHelper::save_mi`] save the results with the
+//!   parallel-HDF5 writers.
+//!
+//! [`MIResults`] is the `(index matrix, value vector)` container, serves as
+//! a data store for the computed results.
+
 use anyhow::{Ok, Result};
 use hdf5::H5Type;
 use mpi::traits::Equivalence;
@@ -17,16 +36,43 @@ use crate::{
 
 use super::WorkflowArgs;
 
+/// Per-stage workflow context for the MCPNet B-spline MI pipeline.
+///
+/// Borrowed references to:
+/// * an MPI communicator interface ([`CommIfx`]),
+/// * the input expression matrix ([`AnnData`]),
+/// * the parsed configuration ([`WorkflowArgs`]),
+/// * the 2-D pair work distribution ([`PairWorkDistributor`]),
+/// * a cumulative timer used to accumulate IO time ([`CumulativeTimer`]).
 pub struct MIWorkFlow<'a> {
+    /// MPI communicator interface (rank/size + `comm()`).
     pub comm_ifx: &'a CommIfx,
+    /// AnnData handle providing access to the expression matrix.
     pub adata: &'a AnnData,
+    /// Parsed workflow configuration.
     pub args: &'a WorkflowArgs,
+    /// Pair work distribution across batches.
     pub wf_dist: &'a PairWorkDistributor,
+    /// Cumulative timer used to accumulate IO time across stages.
     pub io_timer: CumulativeTimer<'a>,
 }
 
+/// Container for the MI computation results: index matrix + value vector. 
+/// Type alias of [`IdVResults`] specialised to the integer/float types.
 pub type MIResults<IntT, FloatT> = IdVResults<IntT, FloatT>;
+/// Type-parametric collection of helper functions used by
+/// [`MIWorkFlow`].
+///
+/// The type parameters select the integer/float widths used for
+/// the various pieces of data:
+///
+/// * `SizeT` — HDF5 dimension type used by the parallel writer.
+/// * `IntT`  — integer width used for the `(row, col)` pair
+///   indices stored alongside each MI value.
+/// * `FloatT` — floating-point width used for the expression
+///   matrix, B-spline weights, and MI values.
 pub(super) struct MIWorkFlowHelper<SizeT, IntT, FloatT> {
+    /// Phantom marker for the generic parameters.
     _a: PhantomData<(SizeT, IntT, FloatT)>,
 }
 
@@ -36,6 +82,12 @@ where
     IntT: PNInteger + H5Type + Default + Equivalence,
     FloatT: 'static + PNFloat + H5Type + Default + Equivalence,
 {
+    /// Load the row and column halves of one batch from the
+    /// HDF5 weights dataset.
+    ///
+    /// For all the `(rows, cols)` ranges for the batch `bidx`,
+    /// calls  [`mpio::read_range_data`] to retrieve weights from
+    /// `args.mi_file:/<weights_ds>` datasets. 
     pub(super) fn load_batch_data(
         wf: &MIWorkFlow,
         rank: i32,
@@ -46,14 +98,14 @@ where
         let wdim = wf.args.weights_dim();
         let block_data = (
             mpio::read_range_data(
-                &wf.args.mi_file,
+                &wf.args.weights_file,
                 &wf.args.weights_ds,
                 0..wdim,
                 rows.clone(),
                 wf.comm_ifx,
             )?,
             mpio::read_range_data(
-                &wf.args.mi_file,
+                &wf.args.weights_file,
                 &wf.args.weights_ds,
                 0..wdim,
                 cols.clone(),
@@ -64,6 +116,12 @@ where
         Ok(block_data)
     }
 
+    /// Build this rank's slice of the B-spline weight matrix.
+    ///
+    /// Reads the column-striped submatrix corresponding to the variables
+    /// assigned to this `rank` from the AnnData object,
+    /// then evaluates [`bspline_weights`] on each column to fill a
+    /// `(nvars_local, weights_dim())` output matrix.
     pub fn construct_bspline_weights(
         wf: &MIWorkFlow,
         rank: i32,
@@ -92,6 +150,8 @@ where
         Ok(spline_weights)
     }
 
+    /// Collectively write the rank's slice of the weight matrix to
+    /// `weights_data_file:/data/weights` via parallel HDF5.
     pub fn write_weights_h5(
         wf: &MIWorkFlow,
         weights_data_file: &str,
@@ -103,6 +163,13 @@ where
         Ok(())
     }
 
+    /// Compute the B-spline MI for every upper-triangular pair in
+    /// one batch.
+    ///
+    /// Loads the batch's row/column weight blocks, then, for each pair 
+    /// (rx, cx), rx < cx, calls [`bspline_mi`] on the corresponding 
+    /// pre-computed weight vectors and packs `(rx, cx, mi)` into the returned
+    /// [`MIResults`].
     pub fn batch_mi_pairs(
         wf: &MIWorkFlow,
         rank: i32,
@@ -144,6 +211,11 @@ where
         Ok(mvr)
     }
 
+    /// Run [`Self::batch_mi_pairs`] over every batch in
+    /// `wf.wf_dist.pairs_2d()` and concatenate the results.
+    ///
+    /// Returns a single [`MIResults`] holding all `(row, col, mi)`
+    /// triples produced on this rank.
     pub fn construct_bspline_mi_pairs(
         wf: &MIWorkFlow,
         rank: i32,
@@ -156,6 +228,11 @@ where
         Ok(MIResults::<IntT, FloatT>::merge(&v_mi))
     }
 
+    /// Collectively write a [`MIResults`] to `mi_file:/data` via
+    /// parallel HDF5.
+    ///
+    /// Writes the `(n, 2)` index matrix as `data/index` and the
+    /// length-`n` MI vector as `data/mi`.
     pub fn save_mi(
         mir: &MIResults<IntT, FloatT>,
         mpi_ifx: &CommIfx,
@@ -178,6 +255,12 @@ where
 }
 
 impl<'a> MIWorkFlow<'a> {
+    /// Execute the [`RunMode::MIBSplineWeights`](crate::mcpn::RunMode::MIBSplineWeights)
+    /// stage: compute this rank's slice of the B-spline weight
+    /// matrix and write it to [`WorkflowArgs::weights_file`].
+    ///
+    /// Uses `i64` for HDF5 dim indices, `i32` for pair indices,
+    /// and `f32` weights.
     pub fn run_bspline_weights(&self) -> Result<()> {
         type HelperT = MIWorkFlowHelper<i64, i32, f32>;
         let weights =
@@ -185,6 +268,12 @@ impl<'a> MIWorkFlow<'a> {
         HelperT::write_weights_h5(&self, &self.args.weights_file, &weights)
     }
 
+    /// Execute the [`RunMode::MIBSpline`](crate::mcpn::RunMode::MIBSpline)
+    /// stage: compute the pairwise B-spline MI from the previously
+    /// persisted weight matrix and write the `(index, mi)` pairs
+    /// to [`WorkflowArgs::mi_file`].
+    ///
+    /// Uses `i64` HDF5 dim indices, `i32` pair indices, and `f32` MI values.
     pub fn run_bspline_mi(&self) -> Result<()> {
         type HelperT = MIWorkFlowHelper<i64, i32, f32>;
         let mir = HelperT::construct_bspline_mi_pairs(&self, self.comm_ifx.rank)?;

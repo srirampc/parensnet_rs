@@ -1,3 +1,18 @@
+//! `gbgrn_cli` — MPI front-end for the gradient-boosted GRN workflow.
+//!
+//! Thin command-line wrapper that parses a single YAML config file
+//! into a [`GBGRNArgs`] and dispatches over [`parensnet_rs::gbn::RunMode`]:
+//!
+//! * [`RunMode::GBCrossFoldValidation`] →
+//!   [`run_cross_fold_gbm`] (CV step only, prints the resulting
+//!   [`parensnet_rs::gbn::CVStats`]).
+//! * [`RunMode::GBGRNet`] → [`infer_gb_network`] (optional CV step
+//!   followed by the distributed gradient-boosting run and HDF5
+//!   network output).
+//!
+//! Designed to be launched via `mpirun`/`srun`; each rank reads the
+//! same config file and participates in the collective workflow.
+
 #![allow(dead_code)]
 use anyhow::Result;
 use clap::Parser;
@@ -18,8 +33,12 @@ struct CLIArgs {
     config: std::path::PathBuf,
 }
 
+/// Bundle returned by [`cli_init`]: parsed CLI args plus the
+/// initialised MPI communicator handle.
 struct CLIInit {
+    /// Parsed command-line arguments.
     args: CLIArgs,
+    /// Initialised MPI communicator interface ([`CommIfx`]).
     mpi_ifx: CommIfx,
 }
 
@@ -29,12 +48,18 @@ impl std::fmt::Display for CLIArgs {
     }
 }
 
+/// CLI-level errors.
 #[derive(Error, Debug)]
 enum Error {
+    /// The config file path could not be read on at least one rank.
+    /// Wraps the path as a string for the user-facing message.
     #[error("Failed to read {0}")]
     InputReadError(String),
 }
 
+/// Initialise the env logger, the MPI world, and parse the CLI
+/// arguments. On parse failure the error is printed on rank 0 only
+/// and then propagated so [`main`] can exit with clap's exit code.
 fn cli_init() -> Result<CLIInit> {
     env_logger::try_init()?;
     let mpi_ifx = CommIfx::init();
@@ -50,6 +75,14 @@ fn cli_init() -> Result<CLIInit> {
     }
 }
 
+/// Body of the binary: load the YAML config, parse it as a
+/// [`GBGRNArgs`], and dispatch over its
+/// [`GBGRNArgs::mode`](parensnet_rs::gbn::GBGRNArgs::mode) to
+/// either [`infer_gb_network`] or [`run_cross_fold_gbm`].
+///
+/// Read failures are detected on every rank and combined with
+/// [`any_of`] so the program aborts collectively when at least one
+/// rank could not open the file.
 fn run(clid: CLIInit) -> Result<()> {
     let mcx = &clid.mpi_ifx;
     cond_info!(mcx.is_root(); "Command Line Arguments : {}", clid.args);
@@ -95,6 +128,10 @@ fn run(clid: CLIInit) -> Result<()> {
     Ok(())
 }
 
+/// Process entry point. Initialises the CLI / MPI world via
+/// [`cli_init`] and forwards to [`run`]. Clap parse errors short-
+/// circuit through [`std::process::exit`] with clap's exit code so
+/// `--help` / `--version` exit cleanly on every rank.
 fn main() -> Result<()> {
     match cli_init() {
         Ok(clid) => run(clid),

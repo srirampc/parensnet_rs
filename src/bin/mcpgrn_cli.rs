@@ -1,10 +1,23 @@
+//! `mcpgrn_cli` — MPI front-end for the MCPNet MI workflow.
+//!
+//! Thin command-line wrapper that parses a single YAML config file
+//! into a [`WorkflowArgs`], fills in the AnnData matrix dimensions, 
+//! and dispatches each stage
+//! in [`parensnet_rs::mcpn::WorkflowArgs::mode`]
+//! ([`parensnet_rs::mcpn::RunMode::MIBSplineWeights`] /
+//! [`parensnet_rs::mcpn::RunMode::MIBSpline`]) through
+//! [`parensnet_rs::mcpn::execute_workflow`].
+//!
+//! Designed to be launched via `mpirun`/`srun`; each rank reads the
+//! same config file and participates in the collective workflow.
+
 use anyhow::Result;
 use clap::Parser;
 use parensnet_rs::{
     anndata::xds_dimensions,
     comm::CommIfx,
     cond_error, cond_info,
-    mcpn::WorkflowArgs,
+    mcpn::{WorkflowArgs, execute_workflow},
 };
 use sope::reduction::any_of;
 use thiserror::Error;
@@ -23,17 +36,23 @@ impl std::fmt::Display for CLIArgs {
     }
 }
 
+/// Bundles: parsed CLI args plus the initialised MPI communicator handle.
 struct CLIInit {
+    /// Parsed command-line arguments.
     args: CLIArgs,
+    /// Initialised MPI communicator interface ([`CommIfx`]).
     mpi_ifx: CommIfx,
 }
 
+/// CLI-level errors.
 #[derive(Error, Debug)]
 enum Error {
+    /// The config file path could not be read on at least one rank.
     #[error("Failed to read {0}")]
     InputReadError(String),
 }
 
+/// Initialise the env logger, the MPI world, and parse the CLI arguments.
 fn cli_init() -> Result<CLIInit> {
     env_logger::try_init()?;
     let mpi_ifx = CommIfx::init();
@@ -49,6 +68,12 @@ fn cli_init() -> Result<CLIInit> {
     }
 }
 
+/// Loads the YAML config, fills in the AnnData dimensions and 
+/// calls [`parensnet_rs::mcpn::execute_workflow`].
+///
+/// Read failures are detected on every rank and combined with
+/// [`any_of`] so the program aborts collectively when at least one
+/// rank could not open the file.
 fn run(clid: CLIInit) -> Result<()> {
     let mcx = &clid.mpi_ifx;
     cond_info!(mcx.is_root(); "Command Line Arguments : {}", clid.args);
@@ -68,8 +93,8 @@ fn run(clid: CLIInit) -> Result<()> {
         let err = Error::InputReadError(String::from("hello"));
         return Err(anyhow::Error::from(err));
     }
-// Load Arguments
-    let _wargs = match serde_saphyr::from_str::<WorkflowArgs>(&rstr?) {
+    // Load Arguments
+    let wargs = match serde_saphyr::from_str::<WorkflowArgs>(&rstr?) {
         Ok(mut wargs) => {
             cond_info!(mcx.is_root(); "Parsed successfully: {:?}", wargs);
             cond_info!(mcx.is_root(); "Data H5AD : {}", wargs.h5ad_file);
@@ -83,8 +108,7 @@ fn run(clid: CLIInit) -> Result<()> {
         }
     };
 
-
-    Ok(())
+    execute_workflow(mcx, &wargs)
 }
 
 fn main() -> Result<()> {
