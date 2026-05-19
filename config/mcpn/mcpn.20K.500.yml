@@ -1,0 +1,10 @@
+h5ad_file: "/localscratch/schockalingam6/tmp/pbmc20k.500/adata.20k.500.h5ad"
+row_major_h5_file: "/localscratch/schockalingam6/tmp/pbmc20k.500/adata.20k.500.rmajor.h5"
+tf_csv_file: "data/pbmc/trrust_tf.txt"
+nroundup: 4
+weights_file: /localscratch2/schockalingam6/out/pbmc20K.500/bspline.weights.20k.500.h5
+mi_file: /localscratch2/schockalingam6/out/pbmc20K.500/bspline.mi.20k.500.h5
+#mode: gb_grn
+mode:
+ #- mi_bspline_weights
+ - mi_bspline

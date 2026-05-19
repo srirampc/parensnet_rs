@@ -100,15 +100,15 @@ where
             mpio::read_range_data(
                 &wf.args.weights_file,
                 &wf.args.weights_ds,
-                0..wdim,
                 rows.clone(),
+                0..wdim,
                 wf.comm_ifx,
             )?,
             mpio::read_range_data(
                 &wf.args.weights_file,
                 &wf.args.weights_ds,
-                0..wdim,
                 cols.clone(),
+                0..wdim,
                 wf.comm_ifx,
             )?,
         );
@@ -138,8 +138,9 @@ where
         // TODO::
         let mut spline_weights: Array2<FloatT> = Array2::zeros((nvars, nweights));
         columns.enumerate().for_each(|(i, _cx)| {
+            let cdata = rdata.column(i).to_owned();
             let wt = bspline_weights(
-                rdata.column(i).as_slice().unwrap_or_default(),
+                cdata.as_slice().unwrap(),
                 wf.args.nbins,
                 wf.args.spline_order,
                 wf.args.nobs,
@@ -158,8 +159,9 @@ where
         weights: &Array2<FloatT>,
     ) -> Result<()> {
         let hfptr = mpio::create_file(wf.comm_ifx, weights_data_file)?;
-        let data_group = hfptr.create_group("data")?;
-        mpio::block_write2d(wf.comm_ifx, &data_group, "weights", &weights)?;
+        let data_group = hfptr.as_group()?;
+        // let data_group = hfptr.create_group("data")?;
+        mpio::block_write2d(wf.comm_ifx, &data_group, &wf.args.weights_ds, weights)?;
         Ok(())
     }
 
@@ -187,15 +189,15 @@ where
         let mut pair_indices: Vec<IntT> = Vec::with_capacity(capacity * 2);
         let mut mi_vals: Vec<FloatT> = Vec::with_capacity(capacity);
         for (i, rx) in rows.clone().enumerate() {
-            let r_data = row_data.column(i);
+            let r_data = row_data.row(i);
             for (j, cx) in cols.clone().enumerate() {
                 if rx < cx {
-                    let c_data = col_data.column(j);
+                    let c_data = col_data.row(j);
                     pair_indices.push(IntT::from_usize(rx).unwrap());
                     pair_indices.push(IntT::from_usize(cx).unwrap());
                     //let index = triu_pair_to_index(wf.args.nvars, rx, cx);
-                    let rx = r_data.as_slice().unwrap_or_default();
-                    let cx = c_data.as_slice().unwrap_or_default();
+                    let rx = r_data.as_slice().unwrap();
+                    let cx = c_data.as_slice().unwrap();
                     // TODO::
                     let mi = bspline_mi(rx, cx, wf.args.nbins, wf.args.nobs);
                     mi_vals.push(mi);
@@ -264,8 +266,8 @@ impl<'a> MIWorkFlow<'a> {
     pub fn run_bspline_weights(&self) -> Result<()> {
         type HelperT = MIWorkFlowHelper<i64, i32, f32>;
         let weights =
-            HelperT::construct_bspline_weights(&self, self.comm_ifx.rank)?;
-        HelperT::write_weights_h5(&self, &self.args.weights_file, &weights)
+            HelperT::construct_bspline_weights(self, self.comm_ifx.rank)?;
+        HelperT::write_weights_h5(self, &self.args.weights_file, &weights)
     }
 
     /// Execute the [`RunMode::MIBSpline`](crate::mcpn::RunMode::MIBSpline)
@@ -276,7 +278,7 @@ impl<'a> MIWorkFlow<'a> {
     /// Uses `i64` HDF5 dim indices, `i32` pair indices, and `f32` MI values.
     pub fn run_bspline_mi(&self) -> Result<()> {
         type HelperT = MIWorkFlowHelper<i64, i32, f32>;
-        let mir = HelperT::construct_bspline_mi_pairs(&self, self.comm_ifx.rank)?;
+        let mir = HelperT::construct_bspline_mi_pairs(self, self.comm_ifx.rank)?;
         HelperT::save_mi(&mir, self.comm_ifx, &self.args.mi_file)?;
         Ok(())
     }

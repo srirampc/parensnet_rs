@@ -625,15 +625,15 @@ where
             .create("nsi")?
             .write_scalar(&nodes.nsi)?;
 
-        io::write_1d(&data_group, "hist_dim", &nodes.hist_dim)?;
-        io::write_1d(&data_group, "hist_start", &nodes.hist_start)?;
-        io::write_1d(&data_group, "hist", &nodes.ahist)?;
+        io::write_1d(data_group, "hist_dim", &nodes.hist_dim)?;
+        io::write_1d(data_group, "hist_start", &nodes.hist_start)?;
+        io::write_1d(data_group, "hist", &nodes.ahist)?;
 
-        io::write_1d(&data_group, "bins_dim", &nodes.bin_dim)?;
-        io::write_1d(&data_group, "bins_start", &nodes.bin_start)?;
-        io::write_1d(&data_group, "bins", &nodes.abins)?;
+        io::write_1d(data_group, "bins_dim", &nodes.bin_dim)?;
+        io::write_1d(data_group, "bins_start", &nodes.bin_start)?;
+        io::write_1d(data_group, "bins", &nodes.abins)?;
 
-        io::write_1d(&data_group, "si_start", &nodes.si_start)?;
+        io::write_1d(data_group, "si_start", &nodes.si_start)?;
         Ok(())
     } 
 
