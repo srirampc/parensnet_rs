@@ -58,7 +58,7 @@ pub trait PUCRTrait<IntT, FloatT> {
     /// Write the PUC results collectively to `puc_file` under a
     /// freshly created `data` group; rank 0 prints a one-line info
     /// summary first.
-    fn save(&self, mpi_ifx: &CommIfx, puc_file: &str) -> Result<(), H5Error>;
+    fn save(&self, mpi_ifx: &CommIfx, puc_file: &str, dname: &str) -> Result<(), H5Error>;
 }
 
 impl<IntT, FloatT> PUCRTrait<IntT, FloatT> for PUCResults<IntT, FloatT>
@@ -66,7 +66,7 @@ where
     IntT: H5Type + Default + Equivalence,
     FloatT: H5Type + Default + Equivalence,
 {
-    fn save(&self, mpi_ifx: &CommIfx, puc_file: &str) -> Result<(), H5Error> {
+    fn save(&self, mpi_ifx: &CommIfx, puc_file: &str, dset: &str) -> Result<(), H5Error> {
         let h_file = mpio::create_file(mpi_ifx, puc_file)?;
         cond_info!(
             mpi_ifx.is_root();
@@ -78,7 +78,7 @@ where
         sope::gather_debug!(mpi_ifx.comm(); "{:?}", self.val.len());
         let h_group = h_file.create_group("data").unwrap();
         mpio::block_write2d(mpi_ifx, &h_group, "index", &self.index)?;
-        mpio::block_write1d(mpi_ifx, &h_group, "puc", &self.val)?;
+        mpio::block_write1d(mpi_ifx, &h_group, dset, &self.val)?;
         Ok(())
     }
 }
@@ -227,7 +227,7 @@ impl<'a> SampledPUCWorkflow<'a> {
         match bat_results {
             Ok(vpair_reds) => {
                 let merged_results = PUCResults::merge(&vpair_reds);
-                merged_results.save(self.mpi_ifx, &self.args.puc_file)?;
+                merged_results.save(self.mpi_ifx, &self.args.puc_file, "puc")?;
                 Ok(())
             }
             Err(err) => Err(err),
@@ -430,7 +430,7 @@ impl<'a> LMRPUCWorkflow<'a> {
             );
             s_timer.reset();
         }
-        m_results.save(self.mpi_ifx, &self.args.puc_file)?;
+        m_results.save(self.mpi_ifx, &self.args.puc_file, "puc")?;
         //
         s_timer.info_section("Save PUC Pairs");
         Ok(())

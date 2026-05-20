@@ -956,7 +956,7 @@ impl<'a> PUCDistWorkflow<'a> {
             puc_results.val[0],
         );
 
-        puc_results.save(self.mpi_ifx, &self.args.puc_file)?;
+        puc_results.save(self.mpi_ifx, &self.args.puc_file, "puc")?;
         s_timer.info_section("Dist PUC::Save Results");
         Ok(())
     }

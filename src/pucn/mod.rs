@@ -42,6 +42,7 @@
 
 #![allow(dead_code)]
 mod args;
+mod context;
 mod ds;
 mod helpers;
 mod misiw;
@@ -266,6 +267,15 @@ pub fn execute_workflow(mpi_ifx: &CommIfx, args: &WorkflowArgs) -> Result<()> {
                     }
                     _ => todo!("Missing mode"),
                 }
+            }
+            RunMode::PUC2PIDC => {
+                let rcontext = context::ContextWorkflow {
+                    args,
+                    wdistr: &wdistr,
+                    mpi_ifx,
+                    io_timer: CumulativeTimer::from_comm(mpi_ifx.comm(), ","),
+                };
+                rcontext.run()?
             }
             _ => todo!("Mode {:?} Not Completed Yet", rmode),
         }
