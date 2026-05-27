@@ -440,12 +440,11 @@ impl<'a> DistCVConfig<'a> {
     fn fold_split_for(&self, run_id: usize) -> (Vec<usize>, Vec<usize>) {
         let sample_id: usize = self.sample_id(run_id);
         let fold_id: usize = self.fold_id(run_id);
-        let current = self.current_sample_kfold.borrow();
         let last = &self.last_sample_kfold;
         if sample_id == last.0 {
             last.1.split_for(fold_id)
-        } else if sample_id == current.0 {
-            current.1.split_for(fold_id)
+        } else if sample_id == self.current_sample_kfold.borrow().0 {
+            self.current_sample_kfold.borrow().1.split_for(fold_id)
         } else {
             self.current_sample_kfold.replace((
                 sample_id,

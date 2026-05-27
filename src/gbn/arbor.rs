@@ -338,6 +338,6 @@ pub fn mpi_gradient_boosting_grn(
         feature_importances_ad(tf_set, adata, tgt_range, &params)?
     };
 
-    let tf_tgt_net = TFOutEdge::from_matrix(tgt_importances, 0, tgt_start);
+    let tf_tgt_net = TFOutEdge::from_matrix(tgt_importances, tgt_start, 0);
     Ok(tf_tgt_net)
 }
