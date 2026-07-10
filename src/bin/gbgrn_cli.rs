@@ -16,7 +16,9 @@
 #![allow(dead_code)]
 use anyhow::Result;
 use clap::Parser;
-use sope::reduction::any_of;
+use sope::{
+    reduction::any_of,
+};
 use thiserror::Error;
 
 use parensnet_rs::{

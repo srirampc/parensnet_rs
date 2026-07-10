@@ -63,6 +63,8 @@ pub use arbor::{
     mpi_gradient_boosting_grn, mpi_write_h5, write_h5,
 };
 
+use sope::timer::SectionTimer;
+
 /// Internal helper: run [`mpi_cv_gbm`] for the supplied TF gene set
 /// using a [`CVConfig`] derived from `args`.
 ///
@@ -131,11 +133,16 @@ pub fn run_cross_fold_gbm(args: &GBGRNArgs, mcx: &CommIfx) -> Result<CVStats> {
 /// Corresponds to the [`RunMode::GBGRNet`] dispatch path.
 pub fn infer_gb_network(args: &GBGRNArgs, mcx: &CommIfx) -> Result<()> {
     cond_info!(mcx.is_root(); "Data H5AD : {}", args.h5ad_file);
+    let s_timer = SectionTimer::from_comm(mcx.comm(), ",");
     let adata = AnnData::new(&args.h5ad_file, Some(args.gene_id_col.clone()), None)?;
+    s_timer.info_section("GB Network::AnnData");
     cond_info!(mcx.is_root(); "TF File  : {}", args.tf_csv_file);
+    s_timer.reset();
     let tf_set =
         GeneSetAD::new(&adata, &args.tf_csv_file, None, Some(args.nroundup))?;
+    s_timer.info_section("GB Network::GeneSetAD");
     cond_info!(mcx.is_root(); "TF Set   : {:?}", tf_set.len());
+    s_timer.reset();
     let num_iterations = if args.skip_cv {
         cond_info!(
             mcx.is_root();
@@ -150,12 +157,15 @@ pub fn infer_gb_network(args: &GBGRNArgs, mcx: &CommIfx) -> Result<()> {
         );
         cv_stats.median
     };
+    s_timer.info_section("GB Network::CV_GBN");
     cond_info!(mcx.is_root(); "START GRAD BOOSTING", );
     let params = GBMParams {
         num_iterations,
         ..GBMParams::default()
     };
+    s_timer.reset();
     let net_edges = mpi_gradient_boosting_grn(&tf_set, mcx, params, true)?;
+    s_timer.info_section("GB Network::GRN_Boost");
     let nedges = sope::reduction::allreduce_sum(&net_edges.len(), mcx.comm());
     cond_println!(
         mcx.is_root(); "[{}] NET EDGES: {} ",
@@ -168,6 +178,7 @@ pub fn infer_gb_network(args: &GBGRNArgs, mcx: &CommIfx) -> Result<()> {
         mcx.comm().barrier();
         cond_info!(mcx.is_root(); "START WRITING OUTPUT FILE", );
     }
+    s_timer.reset();
     mpi_write_h5(
         &adata,
         tf_set.indices_ref(),
@@ -175,6 +186,7 @@ pub fn infer_gb_network(args: &GBGRNArgs, mcx: &CommIfx) -> Result<()> {
         &args.output_file,
         mcx,
     )?;
+    s_timer.info_section("GB Network::Write Network");
     cond_info!(mcx.is_root(); "FINISH WRITING OUTPUT FILE", );
     Ok(())
 }
