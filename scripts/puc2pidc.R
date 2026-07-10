@@ -21,41 +21,53 @@ load_puc <- function(fname) {
     list(index = puc_index, values = puc_values, scores = puc_scores)
 }
 
-puc2pidc <- function(puc_scores) {
+gamma_fit <- function(puc_scores) {
     ngenes <- dim(puc_scores)[1]
-    pidc_scores <- matrix(0.0, ngenes, ngenes)
-    fit_list <- lapply(
+    lapply(
         1:ngenes,
         function(ix) fitdistr(puc_scores[-ix, ix], "gamma")
     )
+}
+
+fit_pidc_score <- function(score, fit_i, fit_j) {
+    score_i <- dgamma(
+        score,
+        shape = fit_i$estimate["shape"],
+        rate = fit_i$estimate["rate"]
+    )
+    score_j <- dgamma(
+        score,
+        shape = fit_j$estimate["shape"],
+        rate = fit_j$estimate["rate"]
+    )
+    score_i <- if (is.na(score_i) || is.infinite(score_i)) {
+        0.0
+    } else {
+        score_i
+    }
+    score_j <- if (is.na(score_j) || is.infinite(score_j)) {
+        0.0
+    } else {
+        score_j
+    }
+    c(score_i = score_i, score_j = score_j)
+}
+
+pidc_score_for <- function(puc_scores, fit_list, ix, jx) {
+    fit_i <- fit_list[[ix]]
+    fit_j <- fit_list[[jx]]
+    fit_pidc_score(puc_scores[ix, jx], fit_i, fit_j)
+}
+
+puc2pidc <- function(puc_scores) {
+    ngenes <- dim(puc_scores)[1]
+    pidc_scores <- matrix(0.0, ngenes, ngenes)
+    fit_list <- gamma_fit(puc_scores)
     cat(Sys.time(), "Build Fit List ", ngenes, "\n")
     for (ix in 1:(ngenes - 1)) {
-        fit_i <- fit_list[[ix]]
         for (jx in (ix + 1):ngenes) {
-            fit_j <- fit_list[[jx]]
-            score <- puc_scores[ix, jx]
-            score_i <- dgamma(
-                score,
-                shape = fit_i$estimate["shape"],
-                scale = fit_i$estimate["scale"]
-            )
-            score_j <- dgamma(
-                score,
-                shape = fit_j$estimate["shape"],
-                scale = fit_j$estimate["scale"]
-            )
-            score_i <- if (is.na(score_i) || is.infinite(score_i)) {
-                0.0
-            } else {
-                score_i
-            }
-            score_j <- if (is.na(score_j) || is.infinite(score_j)) {
-                0.0
-            } else {
-                score_j
-            }
-
-            pidc_scores[ix, jx] <- score_i + score_j
+            p_score <- pidc_score_for(puc_scores, fit_list, ix, jx)
+            pidc_scores[ix, jx] <- p_score[1] + p_score[2]
             pidc_scores[jx, ix] <- pidc_scores[ix, jx]
         }
     }
