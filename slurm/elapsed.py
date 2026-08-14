@@ -11,8 +11,8 @@ log = logging.getLogger(__name__)
 
 def read_timer_data(log_fname: str):
     with open(log_fname) as fptr:
-        fplines = [x for x in fptr.readlines() if "TIMER" in x]
-        lines = [x.strip().split("]")[-1].strip() for x in fplines]
+        fplines = [x.strip() for x in fptr if "TIMER" in x]
+        lines = [x.split("]")[-1].strip() for x in fplines]
         return [lx.split(",")[1:] for lx in lines]
 
 
@@ -20,21 +20,33 @@ def parse_file_name(log_fname: str):
     lpath = pathlib.Path(log_fname).name.replace(".log", "").split("_")
     run_name = lpath[0]
     data_name = lpath[1]
-    data_sizes = re.split(r"[cg]", lpath[-2])
-    run_procs = re.split(r"[pn]", lpath[-1])
-    ncells = data_sizes[-2]
-    ngenes = data_sizes[-1]
-    nprocs = run_procs[-2]
-    nnodes = run_procs[-1]
+    # data_sizes = re.split(r"[cg]", lpath[-2])
+    # run_procs = re.split(r"[pn]", lpath[-1])
+    # print("-> ", data_sizes, run_procs)
+    data_match = re.match("c([^g]+)g(.+)", lpath[-2])
+    proc_match = re.match("p([^n]+)(n(.+)?)?", lpath[-1])
+    # print(":", proc_match.groups())
+    if data_match is not None and proc_match is not None:
+        ncells = data_match[1]
+        ngenes = data_match[2]
+        nprocs = proc_match[1]
+        nnodes = proc_match[3] if proc_match[3] else '1'
+    # nprocs = run_procs[-2]
+    # nnodes = run_procs[-1]
     return [run_name, data_name, ncells, ngenes, nprocs, nnodes]
 
 
 def build_data_frame(
     meta_props,
     rows,
-    col_names=["Max", "Min", "Avg", "Phase"],
-    meta_names=["Run", "Dataset", "NCELLS", "NGENES", "NP", "N"],
+    col_names=None,  # ["Max", "Min", "Avg", "Phase"]
+    meta_names=None,  # ["Run", "Dataset", "NCELLS", "NGENES", "NP", "N"]
 ):
+
+    if col_names is None:
+        col_names = ["Max", "Min", "Avg", "Phase"]
+    if meta_names is None:
+        meta_names = ["Run", "Dataset", "NCELLS", "NGENES", "NP", "N"]
     nrows = len(rows)
     ncols = len(rows[0])
     df_data = {}
@@ -48,7 +60,7 @@ def build_data_frame(
 def log_data_frame(lfx: str):
     data_rows = read_timer_data(lfx)
     if len(data_rows) == 0:
-        log.log(logging.WARN, f"No rows in {lfx}")
+        log.log(logging.WARNING, f"No rows in {lfx}")
         return None
     meta_props = parse_file_name(lfx)
     log.log(logging.DEBUG, f"META : {meta_props}")

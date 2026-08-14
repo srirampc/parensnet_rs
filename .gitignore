@@ -2,6 +2,8 @@
 /slurm/log
 /slurm/scripts
 /target
+.RData
+.Rhistory
 Cargo.lock
 __pycache__
 a.out
