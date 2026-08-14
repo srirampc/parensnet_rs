@@ -362,7 +362,7 @@ impl<'a> DistCVConfig<'a> {
 
     /// Map a global `run_id` to the index of its sampled gene.
     fn sample_id(&self, run_id: usize) -> usize {
-        run_id / self.config.n_sample_genes
+        run_id / self.config.n_folds
     }
 
     /// Map a global `run_id` to its fold index.
@@ -533,6 +533,10 @@ pub fn mpi_cv_gbm(
         sope::cond_info!(mpi_ifx.is_root(); "COMPLETE INIT CONFIG LOAD");
         sope::cond_info!(mpi_ifx.is_root(); "START LOAD TARGET DATA");
     }
+    sope::cond_debug!(
+        mpi_ifx.is_root();
+        "SGN {:?}; RRANGE {:?}", s_genes, d_config.run_range(),
+    );
 
     // Assuming all are unique
     let run_tgt_indices: Vec<usize> = d_config

@@ -1,6 +1,6 @@
 //! Sequential (single-process) HDF5 helpers.
 //!
-//! Module contains wrapper functions for non-MPI I/O. 
+//! Module contains wrapper functions for non-MPI I/O.
 //! Functions take filesystem paths or already-opened
 //! `hdf5::Group` handles and return `ndarray` arrays or scalar
 //! attribute values. For collective parallel I/O over MPI, see the
@@ -21,6 +21,29 @@ pub fn create_file(fname: &str) -> Result<hdf5::File, hdf5::Error> {
     hdf5::File::create(fname)
 }
 
+/// Get dataset from a group, log an error if not found
+pub fn get_group_ds(
+    group: &hdf5::Group,
+    dset_name: &str,
+) -> Result<hdf5::Dataset, hdf5::Error> {
+    match group.dataset(dset_name) {
+        Ok(ds) => Ok(ds),
+        Err(ds_err) => {
+            log::error!("Missing Dataset {}?", dset_name);
+            return Err(ds_err);
+        }
+    }
+}
+
+/// Get dataset from a file, log an error if not found
+pub fn get_dataset(
+    fname: &str,
+    dset_name: &str,
+) -> Result<hdf5::Dataset, hdf5::Error> {
+    let fptr = hdf5::File::open(fname)?;
+    get_group_ds(&fptr, dset_name)
+}
+
 /// Read a single scalar attribute named `name` from `group`.
 ///
 /// `T` may be any type that implements `H5Type` (numeric primitives,
@@ -29,7 +52,14 @@ pub fn read_scalar_attr<T: H5Type>(
     group: &hdf5::Group,
     name: &str,
 ) -> Result<T, hdf5::Error> {
-    group.attr(name)?.read_scalar::<T>()
+    let h5attr = match group.attr(name) {
+        Ok(ds) => ds,
+        Err(ds_err) => {
+            log::error!("Missing Attribute {}", name);
+            return Err(ds_err);
+        }
+    };
+    h5attr.read_scalar::<T>()
 }
 
 /// Open `fname` and read the dataset `dset_name` as an owned 1-D
@@ -38,7 +68,8 @@ pub fn read_1d<T: H5Type>(
     fname: &str,
     dset_name: &str,
 ) -> Result<Array1<T>, hdf5::Error> {
-    hdf5::File::open(fname)?.dataset(dset_name)?.read_1d()
+    let h5ds = get_dataset(fname, dset_name)?;
+    h5ds.read_1d()
 }
 
 /// Open `fname` and read the dataset `dset_name` as an owned 2-D
@@ -47,7 +78,8 @@ pub fn read_2d<T: H5Type>(
     fname: &str,
     dset_name: &str,
 ) -> Result<Array2<T>, hdf5::Error> {
-    hdf5::File::open(fname)?.dataset(dset_name)?.read_2d()
+    let h5ds = get_dataset(fname, dset_name)?;
+    h5ds.read_2d()
 }
 
 /// Read a rectangular `r_range x c_range` sub-region of a 2-D dataset.
@@ -67,9 +99,8 @@ pub fn read2d_slice<T: H5Type, S: ToPrimitive>(
     let cbounds = c_range.start.to_usize().unwrap_or(0)
         ..c_range.end.to_usize().unwrap_or(1);
 
-    hdf5::File::open(fname)?
-        .dataset(dset_name)?
-        .read_slice_2d(ndarray::s![rbounds, cbounds])
+    let h5ds = get_dataset(fname, dset_name)?;
+    h5ds.read_slice_2d(ndarray::s![rbounds, cbounds])
 }
 
 /// Read a contiguous slice of a 1-D dataset that already lives inside
@@ -84,7 +115,14 @@ pub fn read1d_slice<T: H5Type, S: ToPrimitive>(
 ) -> Result<Array1<T>, hdf5::Error> {
     let urange = s_range.start.to_usize().unwrap_or(0)
         ..s_range.end.to_usize().unwrap_or(1);
-    group.dataset(name)?.read_slice_1d(ndarray::s![urange])
+    let h5ds = match group.dataset(name) {
+        Ok(ds) => ds,
+        Err(ds_err) => {
+            log::error!("Missing Dataset {}", name);
+            return Err(ds_err);
+        }
+    };
+    h5ds.read_slice_1d(ndarray::s![urange])
 }
 
 /// Read a single element at index `s_idx` of a 1-D dataset and return
@@ -98,7 +136,13 @@ pub fn read1d_point<T: Clone + H5Type, S: ToPrimitive>(
     s_idx: S,
 ) -> Result<T, hdf5::Error> {
     let suidx = s_idx.to_usize().unwrap_or(0);
-    let h5ds = group.dataset(name)?;
+    let h5ds = match group.dataset(name) {
+        Ok(ds) => ds,
+        Err(ds_err) => {
+            log::error!("Missing Dataset {}", name);
+            return Err(ds_err);
+        }
+    };
     let tval: Array1<T> = h5ds.read_slice_1d(ndarray::s![suidx..suidx + 1])?;
     Ok(tval[0].clone())
 }

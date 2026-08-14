@@ -371,24 +371,24 @@ where
     }
 
     // hist dim
-    fn _hist_dim_for<T: ToPrimitive>(&self, i: T) -> Result<usize, Error> {
+    fn _hist_dim<T: ToPrimitive>(&self, i: T) -> Result<usize, Error> {
         let (ridx, vloc) = self._range_offset(i)?;
         Ok(self.hist_dim.at(ridx)[vloc].to_usize().unwrap())
     }
 
     //
-    fn _hist_start_for<T: ToPrimitive>(&self, i: T) -> Result<usize, Error> {
+    fn _hist_offset<T: ToPrimitive>(&self, i: T) -> Result<usize, Error> {
         let (ridx, vloc) = self._range_offset(i)?;
-        Ok(self.hist_start.at(ridx)[vloc].to_usize().unwrap())
+        Ok(self.range_hist_start.at(ridx)[vloc].to_usize().unwrap())
     }
 
-    fn _si_bounds_start<T: Clone + ToPrimitive>(
+    fn _si_bounds_offset<T: Clone + ToPrimitive>(
         &self,
         about: T,
         by: T,
     ) -> Result<usize, Error> {
         let about_hdim = self
-            ._hist_dim_for(about.clone())
+            ._hist_dim(about.clone())
             .map_err(|_err| Error::InvalidAbout(about.to_usize().unwrap()))?;
         let si_offset = self
             ._si_offset(about.clone())
@@ -403,7 +403,7 @@ where
         by: T,
     ) -> Result<Range<usize>, Error> {
         let about_hdim = self
-            ._hist_dim_for(about.clone())
+            ._hist_dim(about.clone())
             .map_err(|_err| Error::InvalidAbout(about.to_usize().unwrap()))?;
         let si_offset = self
             ._si_offset(about.clone())
@@ -424,8 +424,8 @@ where
 {
     fn get_hist(&self, i: IntT) -> Result<Array1<FloatT>, Error> {
         let (ridx, _vloc) = self._range_offset(i)?;
-        let hs_start = self._hist_start_for(i)?;
-        let hs_stop = hs_start + self._hist_dim_for(i)?;
+        let hs_start = self._hist_offset(i)?;
+        let hs_stop = hs_start + self._hist_dim(i)?;
         Ok(self
             .hist
             .at(ridx)
@@ -451,7 +451,7 @@ where
         rstate: IntT,
     ) -> Result<FloatT, Error> {
         let (ridx, _vloc) = self._range_offset(about)?;
-        let abt_si_start = self._si_bounds_start(about, by)?;
+        let abt_si_start = self._si_bounds_offset(about, by)?;
         Ok(self.si.at(ridx)[abt_si_start + rstate.to_usize().unwrap()])
     }
 
