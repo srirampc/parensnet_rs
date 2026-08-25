@@ -1,7 +1,7 @@
-h5ad_file: "./data/rsc.5k/adata_lei.100k.5k.h5ad"
+h5ad_file: "./data/rsc.1k/adata_lei.100k.1k.h5ad"
 tf_csv_file: "data/pbmc/trrust_tf.txt"
 nroundup: 3
-output_file: "./out/rsc.5k/rsc.100K.5K.gb_grn.h5"
+output_file: "./out/rsc.1k/rsc.100K.1K.gb_grn.h5"
 #mode: gb_grn
 mode: cv_gb
 gbm_params:

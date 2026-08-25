@@ -60,6 +60,7 @@ if [ -z "$NPR" ]; then
 MPI_ARGS="--bind-to CORE"
 else
 MPI_ARGS="--map-by ppr:$NPR:node"
+#
 #MPI_ARGS="--npernode $NPR"
 #MPI_ARGS="--map-by node"
 #MPI_ARGS=""
@@ -78,7 +79,9 @@ echo "RUST_LOG        :: $RUST_LOG"
 echo mpirun -np "$NP" "$MPI_ARGS" "$P_EXE" "$P_CFG"
 ldd $P_EXE
 $P_EXE --help
-mpirun --help
+#mpirun --help
+unset LUA_PATH
+unset LUA_CPATH
 mpirun -np $NP $MPI_ARGS $P_EXE $P_CFG
 
 spack unload openmpi hdf5

@@ -2,9 +2,10 @@ h5ad_file: "./data/rsc.5k/adata_lei.100k.5k.h5ad"
 tf_csv_file: "data/pbmc/trrust_tf.txt"
 nroundup: 3
 output_file: "./out/rsc.5k/rsc.100K.5K.gb_grn.h5"
-#mode: gb_grn
-mode: cv_gb
+mode: gb_grn
 gbm_params:
   verbose: 0
   num_threads: 2
 n_sample_genes: 500
+num_iterations: 67
+skip_cv: True

@@ -15,8 +15,8 @@ HEADER = """#!/bin/bash
 
 # Change to working directory
 cd "$SLURM_SUBMIT_DIR" || exit
-SCRIPT="{source_dir}/slurm/run_puc_srun.sh"
-CFG_LOC="{source_dir}/config/pucn/"
+SCRIPT="{source_dir}/slurm/run_{exec}_srun.sh"
+CFG_LOC="{source_dir}/config/{exec}n/"
 
 """
 
@@ -26,10 +26,11 @@ $SCRIPT -c "$CFG_LOC/{config_file}" -p {np}
 
 
 class ScalingRunGenerator:
-    def __init__(self, account, source_dir, log_dir):
+    def __init__(self, account, source_dir, log_dir, exec):
         self.account = account
         self.source_dir = source_dir
         self.log_dir = log_dir
+        self.exec = exec
 
     def header_for(self, nproc, name, hours, mins):
         return HEADER.format(
@@ -42,6 +43,7 @@ class ScalingRunGenerator:
             mins=mins,
             log_dir=self.log_dir,
             source_dir=self.source_dir,
+            exec=self.exec
         )
 
     def command_for(self, nproc, config_file):
@@ -114,10 +116,12 @@ class ScalingRunGenerator:
                     fptr.write(script_str)
 
 
-def data_prep(args):
+def puc_data_prep(args):
     source_dir = os.path.expandvars(args.source_dir)
     dest_dir = f"{source_dir}/slurm/scripts/prep/"
-    sgen = ScalingRunGenerator(args.account, args.source_dir, "prep")
+    sgen = ScalingRunGenerator(
+        args.account, args.source_dir, "prep", args.exec
+    )
     shutil.rmtree(dest_dir, ignore_errors=True)
     pathlib.Path(dest_dir).mkdir(parents=True, exist_ok=True)
     config_files = [
@@ -133,19 +137,35 @@ def data_prep(args):
     sgen.slurm_configs(1, 00, config_files, dest_dir, 1, [512])
 
 
-def strong_scaling(args):
+def gbgr_strong_scaling(args):
+    source_dir = os.path.expandvars(args.source_dir)
+    dest_dir = f"{source_dir}/slurm/scripts/gb/strong/"
+    pathlib.Path(dest_dir).mkdir(parents=True, exist_ok=True)
+    sgen = ScalingRunGenerator(
+        args.account, args.source_dir, "strong", args.exec
+    )
+    shutil.rmtree(dest_dir, ignore_errors=True)
+    pathlib.Path(dest_dir).mkdir(parents=True, exist_ok=True)
+    sgen.pow2_scaling(1, 00, "gbn_lung_c100Kg5K.yml", dest_dir, 3)
+
+
+def puc_strong_scaling(args):
     source_dir = os.path.expandvars(args.source_dir)
     dest_dir = f"{source_dir}/slurm/scripts/strong/"
-    sgen = ScalingRunGenerator(args.account, args.source_dir, "strong")
+    sgen = ScalingRunGenerator(
+        args.account, args.source_dir, "strong", args.exec
+    )
     shutil.rmtree(dest_dir, ignore_errors=True)
     pathlib.Path(dest_dir).mkdir(parents=True, exist_ok=True)
     sgen.pow2_scaling(1, 00, "dmisipuc_lung_c100Kg5K.yml", dest_dir, 3)
 
 
-def weak_scaling(args):
+def puc_weak_scaling(args):
     source_dir = os.path.expandvars(args.source_dir)
     dest_dir = f"{source_dir}/slurm/scripts/weak/"
-    sgen = ScalingRunGenerator(args.account, args.source_dir, "weak")
+    sgen = ScalingRunGenerator(
+        args.account, args.source_dir, "weak", args.exec
+    )
     shutil.rmtree(dest_dir, ignore_errors=True)
     pathlib.Path(dest_dir).mkdir(parents=True, exist_ok=True)
     config_files = [
@@ -161,10 +181,34 @@ def weak_scaling(args):
     sgen.slurm_configs(1, 00, config_files, dest_dir, 3, [256])
 
 
-def big_datasets(args):
+def gbgr_weak_scaling(args):
     source_dir = os.path.expandvars(args.source_dir)
-    dest_dir = f"{source_dir}/slurm/scripts/big/"
-    sgen = ScalingRunGenerator(args.account, args.source_dir, "big")
+    dest_dir = f"{source_dir}/slurm/scripts/gb/weak/"
+    pathlib.Path(dest_dir).mkdir(parents=True, exist_ok=True)
+    sgen = ScalingRunGenerator(
+        args.account, args.source_dir, "weak", args.exec
+    )
+    shutil.rmtree(dest_dir, ignore_errors=True)
+    pathlib.Path(dest_dir).mkdir(parents=True, exist_ok=True)
+    config_files = [
+        "gbn_lung_c100Kg1K.yml",
+        "gbn_lung_c100Kg3K.yml",
+        "gbn_lung_c100Kg5K.yml",
+        "gbn_lung_c100Kg8K.yml",
+        "gbn_lung_c100Kg10K.yml",
+        "gbn_lung_c100Kg12K.yml",
+        "gbn_lung_c100Kg15K.yml",
+        "gbn_lung_c100Kg18K.yml",
+    ]
+    sgen.slurm_configs(1, 00, config_files, dest_dir, 3, [256])
+
+
+def puc_big_datasets(args):
+    source_dir = os.path.expandvars(args.source_dir)
+    dest_dir = f"{source_dir}/slurm/scripts/gbr/big/"
+    sgen = ScalingRunGenerator(
+        args.account, args.source_dir, "big", args.exec
+    )
     shutil.rmtree(dest_dir, ignore_errors=True)
     pathlib.Path(dest_dir).mkdir(parents=True, exist_ok=True)
     olmisi_config_files = [
@@ -200,10 +244,14 @@ def create_output_dirs(out_dir):
 
 def main(args):
     create_output_dirs(args.out_dir)
-    data_prep(args)
-    strong_scaling(args)
-    weak_scaling(args)
-    big_datasets(args)
+    if args.exec == 'puc':
+        puc_data_prep(args)
+        puc_weak_scaling(args)
+        puc_strong_scaling(args)
+        puc_big_datasets(args)
+    if args.exec == 'gbgr':
+        gbgr_strong_scaling(args)
+        gbgr_weak_scaling(args)
 
 
 if __name__ == "__main__":
@@ -212,6 +260,10 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "-a", "--account", type=str, required=True, help="Account For Slurm"
+    )
+    parser.add_argument(
+        "-x", "--exec", type=str, required=True, choices=["puc", "gbgr"],
+        default="puc", help="Script to Run"
     )
     parser.add_argument(
         "-o",
