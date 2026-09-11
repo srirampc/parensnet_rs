@@ -1,0 +1,11 @@
+h5ad_file: "./data/pbmc_scrna/0800K/pbmc800K.20K.h5ad"
+tf_csv_file: "data/pbmc/trrust_tf.txt"
+nroundup: 3
+output_file: "./out/pbmc800K.20K/adata.800K.20K.gbgrn.h5"
+# "./out/rsc.1k/rsc.100K.1K.gb_grn.h5"
+#mode: gb_grn
+mode: cv_gb
+gbm_params:
+  verbose: 0
+  num_threads: 2
+n_sample_genes: 500

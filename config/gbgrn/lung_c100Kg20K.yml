@@ -1,7 +1,7 @@
-h5ad_file: "/localscratch/schockalingam6/tmp/rsc.8k/adata_lei.100k.8k.h5ad"
+h5ad_file: "./data/rsc.20k/adata_lei.100k.20k.h5ad"
 tf_csv_file: "data/pbmc/trrust_tf.txt"
 nroundup: 3
-output_file: /localscratch/schockalingam6/tmp/rsc.8k/rsc.8k.h5
+output_file: "./out/rsc.20k/rsc.100K.20K.gb_grn.h5"
 # mode: gb_grn
 mode: cv_gb
 gbm_params:
