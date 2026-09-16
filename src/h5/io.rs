@@ -9,7 +9,7 @@
 use crate::types::Pair;
 use hdf5::H5Type;
 use ndarray::{Array1, Array2};
-use num::ToPrimitive;
+use num::{ToPrimitive, Zero};
 use std::ops::Range;
 
 /// Create (or truncate) an HDF5 file at `fname` and return the
@@ -125,6 +125,42 @@ pub fn read1d_slice<T: H5Type, S: ToPrimitive>(
     h5ds.read_slice_1d(ndarray::s![urange])
 }
 
+/// Read of a slice of rows: `rows x col_bounds`
+/// sub-slice of the 2-D dataset `ds_name` in the given group.
+pub fn read2d_slice_of_rows<T: H5Type + Clone + Zero>(
+    group: &hdf5::Group,
+    ds_name: &str,
+    row_indices: &[usize],
+    col_bounds: std::ops::Range<usize>,
+) -> Result<ndarray::Array2<T>, hdf5::Error> {
+    let h5ds = get_group_ds(group, ds_name)?;
+    let mut r_mat = Array2::<T>::zeros([row_indices.len(), col_bounds.len()]);
+    for (i, row_index) in row_indices.iter().enumerate() {
+        let selection = ndarray::s![*row_index, col_bounds.clone()];
+        let r_slice = h5ds.read_slice_1d(selection)?;
+        r_mat.row_mut(i).assign(&r_slice);
+    }
+    Ok(r_mat)
+}
+
+/// Read of a slice of columns: `row_bounds x columns`
+/// sub-slice of the 2-D dataset `ds_name` in the given group.
+pub fn read2d_slice_of_cols<T: H5Type + Clone + Zero>(
+    group: &hdf5::Group,
+    ds_name: &str,
+    col_indices: &[usize],
+    row_bounds: std::ops::Range<usize>,
+) -> Result<ndarray::Array2<T>, hdf5::Error> {
+    let h5ds = get_group_ds(group, ds_name)?;
+    let mut r_mat = Array2::<T>::zeros([row_bounds.len(), col_indices.len()]);
+    for (i, col_index) in col_indices.iter().enumerate() {
+        let selection = ndarray::s![row_bounds.clone(), *col_index];
+        let r_slice = h5ds.read_slice_1d(selection)?;
+        r_mat.column_mut(i).assign(&r_slice);
+    }
+    Ok(r_mat)
+}
+
 /// Read a single element at index `s_idx` of a 1-D dataset and return
 /// it by value.
 ///
@@ -229,4 +265,65 @@ pub fn write_1d<T: H5Type>(
         .create(dsname)?
         .as_writer()
         .write(data)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ndarray::Array2;
+
+    /// Create a temporary HDF5 file holding a `6 x 8` i32 dataset `X`
+    /// with `X[i][j] == i * 8 + j`, and return the file handle together
+    /// with the in-memory reference matrix.
+    fn write_test_ds(fname: &str) -> (hdf5::File, Array2<i32>) {
+        let hfile = create_file(fname).unwrap();
+        let mat =
+            Array2::from_shape_fn((6usize, 8usize), |(i, j)| (i * 8 + j) as i32);
+        write_2d(&hfile, "X", &mat).unwrap();
+        (hfile, mat)
+    }
+
+    #[test]
+    fn test_read2d_slice_of_rows() {
+        let fname = std::env::temp_dir().join("parensnet_io_rows.h5");
+        let fpath = fname.to_str().unwrap();
+        let (hfile, mat) = write_test_ds(fpath);
+
+        let row_indices = [0usize, 3, 5];
+        let col_bounds = 2..6;
+        let r_mat: Array2<i32> =
+            read2d_slice_of_rows(&hfile, "X", &row_indices, col_bounds.clone())
+                .unwrap();
+
+        assert_eq!(r_mat.shape(), &[3, 4]);
+        let expected = Array2::from_shape_fn((3usize, 4usize), |(i, j)| {
+            mat[(row_indices[i], col_bounds.start + j)]
+        });
+        assert_eq!(r_mat, expected);
+
+        drop(hfile);
+        std::fs::remove_file(fpath).ok();
+    }
+
+    #[test]
+    fn test_read2d_slice_of_cols() {
+        let fname = std::env::temp_dir().join("parensnet_io_cols.h5");
+        let fpath = fname.to_str().unwrap();
+        let (hfile, mat) = write_test_ds(fpath);
+
+        let col_indices = [1usize, 4, 7];
+        let row_bounds = 1..5;
+        let c_mat: Array2<i32> =
+            read2d_slice_of_cols(&hfile, "X", &col_indices, row_bounds.clone())
+                .unwrap();
+
+        assert_eq!(c_mat.shape(), &[4, 3]);
+        let expected = Array2::from_shape_fn((4usize, 3usize), |(r, c)| {
+            mat[(row_bounds.start + r, col_indices[c])]
+        });
+        assert_eq!(c_mat, expected);
+
+        drop(hfile);
+        std::fs::remove_file(fpath).ok();
+    }
 }

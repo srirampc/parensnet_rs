@@ -3,13 +3,14 @@ use clap::Parser;
 use mpi::traits::{Communicator, CommunicatorCollectives, Root};
 use ndarray::{Array1, Array2};
 use parensnet_rs::{
+    anndata::AnnData,
     comm::CommIfx,
     cond_error, cond_info, cond_println,
     h5::{
-        io::read_scalar_attr,
+        io,
         mpio::{
             block_read1d, block_read2d, block_write1d, block_write2d,
-            create_file, create_write2d,
+            create_file, create_write2d, read2d_row_slice, read2d_slice_of_rows,
         },
     },
     pucn::{collect_samples, generate_samples},
@@ -18,6 +19,7 @@ use parensnet_rs::{
         triu_pair_to_index,
     },
 };
+use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
 use std::iter::zip;
 
@@ -37,6 +39,8 @@ pub enum Test {
     Samples,
     #[serde(alias = "pair_dist")]
     PairDist,
+    #[serde(alias = "slice_reads")]
+    SliceReads,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -55,7 +59,13 @@ pub struct InArgs {
     pub tests: Vec<Test>,
 }
 
-const ALL_TESTS: [Test; 3] = [Test::H5, Test::Samples, Test::PairDist];
+const ALL_TESTS: [Test; 4] =
+    [Test::H5, Test::Samples, Test::PairDist, Test::SliceReads];
+
+/// Number of rows each rank writes in the slice-read test dataset.
+const SLICE_NROWS_PER_RANK: usize = 5;
+/// Number of columns of the slice-read test dataset.
+const SLICE_NCOLS: usize = 7;
 
 fn print_data_dist(comm_ifx: &CommIfx, ldata: usize) {
     let ndata = comm_ifx.collect_counts(ldata);
@@ -273,8 +283,8 @@ fn test_pair_dist(mcx: &CommIfx, args: &InArgs) -> Result<()> {
     let file = hdf5::File::open(&args.misi_file)?;
     let data_g = file.group("data")?;
     // attributes
-    let nvars = read_scalar_attr::<i64>(&data_g, "nvars")? as usize;
-    let npairs = read_scalar_attr::<i64>(&data_g, "npairs")? as usize;
+    let nvars = io::read_scalar_attr::<i64>(&data_g, "nvars")? as usize;
+    let npairs = io::read_scalar_attr::<i64>(&data_g, "npairs")? as usize;
     let hist_dim: Array1<usize> = data_g
         .dataset("hist_dim")?
         .read_1d::<i32>()?
@@ -299,8 +309,134 @@ fn test_pair_dist(mcx: &CommIfx, args: &InArgs) -> Result<()> {
     Ok(())
 }
 
+/// Collectively create `fname` and write a small 2-D dataset `data/X` in
+/// which element `(i, j) == i * SLICE_NCOLS + j`, with each rank writing a
+/// contiguous stripe of rows. Shared setup for the slice-read tests;
+/// returns `(total_nrows, ncols)`.
+fn write_slice_test_data(mcx: &CommIfx, fname: &str) -> (usize, usize) {
+    let irow0 = mcx.rank as usize * SLICE_NROWS_PER_RANK;
+    let data =
+        Array2::from_shape_fn((SLICE_NROWS_PER_RANK, SLICE_NCOLS), |(i, j)| {
+            ((irow0 + i) * SLICE_NCOLS + j) as i32
+        });
+    create_write2d(mcx, fname, "data", "X", &data).unwrap();
+    mcx.comm().barrier();
+    (mcx.size as usize * SLICE_NROWS_PER_RANK, SLICE_NCOLS)
+}
+
+/// Test [`mpio::read2d_row_slice`] on the dataset written by
+/// [`write_slice_test_data`]. Every rank reads its own first global row
+/// over `2..5` columns and checks it against the expected values.
+fn test_read2d_row_slice(mcx: &CommIfx) -> Result<()> {
+    let fname = "tmp/test_slice_reads.h5";
+    let (_, ncols) = write_slice_test_data(mcx, fname);
+
+    let row = mcx.rank as usize * SLICE_NROWS_PER_RANK;
+    let cbounds = 2..5;
+    let r_slice =
+        read2d_row_slice::<i32>(fname, "data/X", row, cbounds.clone(), mcx)
+            .unwrap();
+    let expected: Array1<i32> =
+        Array1::from_iter(cbounds.clone().map(|j| (row * ncols + j) as i32));
+    assert_eq!(r_slice, expected);
+    cond_info!(
+        mcx.is_root();
+        "[slice_reads] read2d_row_slice OK: row {} cols {:?}",
+        row,
+        cbounds
+    );
+    Ok(())
+}
+
+/// Test [`mpio::read2d_slice_of_rows`] on the dataset written by
+/// [`write_slice_test_data`]. Every rank reads rows `{0, last, own}` over
+/// `1..4` columns and checks each row against the expected values.
+fn test_read2d_slice_of_rows(mcx: &CommIfx) -> Result<()> {
+    let fname = "tmp/test_slice_reads.h5";
+    let (nrows_total, ncols) = write_slice_test_data(mcx, fname);
+
+    let indices = [
+        0usize,
+        nrows_total - 1,
+        mcx.rank as usize * SLICE_NROWS_PER_RANK,
+    ];
+    let cbounds = 1..4;
+    let r_block = read2d_slice_of_rows::<i32>(
+        fname,
+        "data/X",
+        &indices,
+        cbounds.clone(),
+        mcx,
+    )
+    .unwrap();
+    for (k, ri) in indices.iter().enumerate() {
+        let expected: Array1<i32> =
+            Array1::from_iter(cbounds.clone().map(|j| (ri * ncols + j) as i32));
+        assert_eq!(r_block.row(k), expected);
+    }
+    cond_info!(
+        mcx.is_root();
+        "[slice_reads] read2d_slice_of_rows OK: rows {:?} cols {:?}",
+        indices,
+        cbounds
+    );
+    Ok(())
+}
+
+fn test_read2d_slice_of_rows_large(mcx: &CommIfx) -> Result<()> {
+    let fname = "./data/pbmc_scrna/0800K/pbmc800K.20K.rmajor.h5";
+    let hdf5_path = "./data/pbmc_scrna/0800K/pbmc800K.20K.h5ad";
+    let adata = AnnData::new(hdf5_path, None, None)?;
+
+    let n_sample_genes = 3;
+    let mut rng = rand::rng();
+    let mut var_indices: Vec<usize> = (0..adata.nvars).collect();
+    var_indices.shuffle(&mut rng);
+    let indices: Vec<usize> =
+        var_indices.into_iter().take(n_sample_genes).collect();
+
+    let cbounds = 0..adata.nobs;
+
+    let r_block =
+        read2d_slice_of_rows::<f32>(fname, "X", &indices, cbounds.clone(), mcx)
+            .unwrap();
+
+    cond_info!(
+        mcx.is_root();
+        "[slice_reads_large] read2d_slice_of_rows OK: dim [{:?}], rows [{:?}] cols {:?}",
+        r_block.dim(), indices, cbounds
+    );
+
+    cond_info!(
+        mcx.is_root();
+        "[slice_reads_large] Top Corner: {:?}", r_block
+    );
+
+    if mcx.is_root() {
+        let adata2 = AnnData::new(hdf5_path, None, Some(fname.to_string()))?;
+        let sr_block = adata2.read_submatrix::<f32>(&indices)?;
+        // let h5ptr = hdf5::File::open(fname)?;
+        //let sr_block =
+        //    io::read2d_slice_of_rows::<f32>(&h5ptr, "X", &indices, cbounds)
+        //        .unwrap();
+        log::info!(
+            "[slice_reads_large] sr_block [{:?}] top: {:?}",
+            sr_block.dim(),
+            sr_block,
+        );
+        let sr_mat = adata.read_submatrix::<f32>(&indices)?;
+        log::info!(
+            "[slice_reads_large] Top sr_mat [{:?}] top: {:?}",
+            sr_mat.dim(),
+            sr_mat,
+        );
+    }
+    Ok(())
+}
+
 fn run(mcx: &CommIfx, args: CLIArgs) -> Result<()> {
     let wargs = parse_args(mcx, &args)?;
+    cond_info!(mcx.is_root(); "ARGS {:?}", wargs);
     let tests = if wargs.tests.is_empty() {
         ALL_TESTS.as_slice()
     } else {
@@ -316,6 +452,11 @@ fn run(mcx: &CommIfx, args: CLIArgs) -> Result<()> {
             }
             Test::PairDist => {
                 test_pair_dist(mcx, &wargs)?;
+            }
+            Test::SliceReads => {
+                test_read2d_row_slice(mcx)?;
+                test_read2d_slice_of_rows(mcx)?;
+                test_read2d_slice_of_rows_large(mcx)?;
             }
         }
     }

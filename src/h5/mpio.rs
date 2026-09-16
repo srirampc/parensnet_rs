@@ -1,6 +1,6 @@
 //! Parallel HDF5 ("MPIO") helpers.
 //!
-//! Module includes wrappers do collective reads and writes through MPI-IO. 
+//! Module includes wrappers do collective reads and writes through MPI-IO.
 //! Every function takes a [`crate::comm::CommIfx`] (MPI communicator wrapper).
 //! Read functions use either a caller-supplied data partitioner from
 //! `sope::partition::Dist` or fall back to an
@@ -12,6 +12,7 @@ use hdf5::H5Type;
 use mpi::collective::SystemOperation;
 use mpi::traits::AsRaw;
 use ndarray::{Array1, Array2};
+use num::Zero;
 use sope::{
     partition::{self, Dist, InterleavedDist},
     reduction::{all_same, allreduce_sum, exclusive_scan},
@@ -22,7 +23,7 @@ use crate::{comm::CommIfx, cond_debug};
 /// Collectively create (truncate) an HDF5 file at `fname` with the
 /// MPIO file access property list configured from `mcx`.
 ///
-/// Configures the underlying file access property list with `mpio` plus 
+/// Configures the underlying file access property list with `mpio` plus
 /// collective metadata operations so that all ranks participate in the I/O.
 /// All ranks of `mcx` must call this in the same order; the resulting
 /// `hdf5::File` is suitable for collective dataset creation and
@@ -272,6 +273,50 @@ pub fn read_range_data<T: H5Type + Clone>(
     let selection = ndarray::s![rbounds, cbounds];
     let rdata: Array2<T> = ds.as_reader().indi_read_slice_2d(selection)?;
     Ok(rdata)
+}
+
+/// Independent (non-collective) read of a row slice: `row x cbounds`
+/// sub-slice of the 2-D dataset `ds_name` in the file at `h5path`.
+///
+/// The communicator `cx` is used only to open the file in MPIO mode;
+/// the slice itself is fetched with `indi_read_slice_1d` so each rank
+/// can request a different row without coordinating with peers.
+pub fn read2d_row_slice<T: H5Type + Clone>(
+    h5path: &str,
+    ds_name: &str,
+    row: usize,
+    cbounds: std::ops::Range<usize>,
+    cx: &CommIfx,
+) -> Result<ndarray::Array1<T>, hdf5::Error> {
+    let h5fptr = open_file(cx, h5path)?;
+    let ds = h5fptr.dataset(ds_name)?;
+    let selection = ndarray::s![row, cbounds];
+    let rdata = ds.as_reader().indi_read_slice_1d(selection)?;
+    Ok(rdata)
+}
+
+/// Independent (non-collective) read of a slice of rows: `rows x cbounds`
+/// sub-slice of the 2-D dataset `ds_name` in the file at `h5path`.
+///
+/// The communicator `cx` is used only to open the file in MPIO mode;
+/// the slice itself is fetched with `indi_read_slice_1d` so each rank
+/// can request a different region without coordinating with peers.
+pub fn read2d_slice_of_rows<T: H5Type + Clone + Zero>(
+    h5path: &str,
+    ds_name: &str,
+    row_indices: &[usize],
+    col_bounds: std::ops::Range<usize>,
+    cx: &CommIfx,
+) -> Result<ndarray::Array2<T>, hdf5::Error> {
+    let h5f_ptr = open_file(cx, h5path)?;
+    let ds = h5f_ptr.dataset(ds_name)?;
+    let mut r_mat = Array2::<T>::zeros([row_indices.len(), col_bounds.len()]);
+    for (i, row_index) in row_indices.iter().enumerate() {
+        let selection = ndarray::s![*row_index, col_bounds.clone()];
+        let r_slice = ds.as_reader().indi_read_slice_1d(selection)?;
+        r_mat.row_mut(i).assign(&r_slice);
+    }
+    Ok(r_mat)
 }
 
 /// Same as [`read_range_data`] but returns the transposed slice.

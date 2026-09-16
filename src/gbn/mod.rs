@@ -87,11 +87,11 @@ fn mpi_cv_gbn_for(
 
     cond_info!(mcx.is_root(); "CV Config : {:?}", config);
     let cv_stats = mpi_cv_gbm(tf_set, &config, mcx)?;
-    if log::log_enabled!(log::Level::Debug) && mcx.is_root() {
-        cv_stats.print();
-    }
 
     if log::log_enabled!(log::Level::Info) {
+        if mcx.is_root() {
+            cv_stats.print();
+        }
         mcx.comm().barrier();
     }
 
@@ -106,12 +106,21 @@ fn mpi_cv_gbn_for(
 /// Run only the cross-validation stage of the GBN workflow and
 /// return the per-target [`CVStats`].
 pub fn run_cross_fold_gbm(args: &GBGRNArgs, mcx: &CommIfx) -> Result<CVStats> {
-    cond_info!(mcx.is_root(); "Data H5AD : {}", args.h5ad_file);
-    let adata = AnnData::new(&args.h5ad_file, Some(args.gene_id_col.clone()), None)?;
-    cond_info!(mcx.is_root(); "TF File  : {}", args.tf_csv_file);
-    let tf_set =
-        GeneSetAD::new(&adata, &args.tf_csv_file, None, Some(args.nroundup))?;
-    cond_info!(mcx.is_root(); "TF Set   : {:?}", tf_set.len());
+    cond_info!(mcx.is_root(); "CV Data H5AD : {}", args.h5ad_file);
+    let adata = AnnData::new(
+        &args.h5ad_file,
+        Some(args.gene_id_col.clone()),
+        args.row_major_h5_file.clone(),
+    )?;
+    cond_info!(mcx.is_root(); "CV TF File  : {}", args.tf_csv_file);
+    let tf_set = GeneSetAD::new(
+        &adata,
+        &args.tf_csv_file,
+        None,
+        Some(args.nroundup),
+        Some(&mcx),
+    )?;
+    cond_info!(mcx.is_root(); "CV TF Set   : {:?}", tf_set.len());
     mpi_cv_gbn_for(&tf_set, args, mcx)
 }
 
@@ -134,12 +143,21 @@ pub fn run_cross_fold_gbm(args: &GBGRNArgs, mcx: &CommIfx) -> Result<CVStats> {
 pub fn infer_gb_network(args: &GBGRNArgs, mcx: &CommIfx) -> Result<()> {
     cond_info!(mcx.is_root(); "Data H5AD : {}", args.h5ad_file);
     let s_timer = SectionTimer::from_comm(mcx.comm(), ",");
-    let adata = AnnData::new(&args.h5ad_file, Some(args.gene_id_col.clone()), None)?;
+    let adata = AnnData::new(
+        &args.h5ad_file,
+        Some(args.gene_id_col.clone()),
+        args.row_major_h5_file.clone(),
+    )?;
     s_timer.info_section("GB Network::AnnData");
     cond_info!(mcx.is_root(); "TF File  : {}", args.tf_csv_file);
     s_timer.reset();
-    let tf_set =
-        GeneSetAD::new(&adata, &args.tf_csv_file, None, Some(args.nroundup))?;
+    let tf_set = GeneSetAD::new(
+        &adata,
+        &args.tf_csv_file,
+        None,
+        Some(args.nroundup),
+        Some(&mcx),
+    )?;
     s_timer.info_section("GB Network::GeneSetAD");
     cond_info!(mcx.is_root(); "TF Set   : {:?}", tf_set.len());
     s_timer.reset();

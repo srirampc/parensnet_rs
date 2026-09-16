@@ -312,7 +312,6 @@ fn default_num_iterations() -> usize {
     32
 }
 
-
 /// Top-level configuration for a GBN workflow run.
 ///
 /// Constructed by deserialising a YAML/TOML config file. Mandatory
@@ -329,6 +328,9 @@ pub struct GBGRNArgs {
     //  - Files/Paths
     /// Path to the input AnnData (`.h5ad`) expression file.
     pub h5ad_file: String,
+    /// Optional sibling row-major HDF5 file (see
+    /// [`crate::anndata::AnnData`]) used to accelerate column reads.
+    pub row_major_h5_file: Option<String>,
     /// Path to the transcription-factor list (CSV); each row names
     /// one TF gene to keep on the predictor side of every model.
     pub tf_csv_file: String,

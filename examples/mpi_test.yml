@@ -6,4 +6,4 @@ nsamples: 4
 nrounds: 6
 nvars: 500
 tests:
-  - pair_dist
+  - slice_reads

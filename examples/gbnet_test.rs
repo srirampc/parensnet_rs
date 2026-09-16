@@ -3,10 +3,7 @@ use itertools::Itertools;
 
 use parensnet_rs::{
     anndata::{AnnData, GeneSetAD},
-    gbn::{
-        CVConfig, TFOutEdge, feature_importances, cv_gbm,
-        write_h5,
-    },
+    gbn::{CVConfig, TFOutEdge, cv_gbm, feature_importances, write_h5},
 };
 
 //use lightgbm3::{Booster, Dataset};
@@ -101,7 +98,7 @@ use parensnet_rs::{
 fn run_gb_grn(ad_fname: &str, tf_csv: &str, out_file: &str) -> Result<()> {
     let ndecimals: usize = 3;
     let adata = AnnData::new(ad_fname, Some("_index".to_string()), None)?;
-    let tf_set = GeneSetAD::new(&adata, tf_csv, None, Some(ndecimals))?;
+    let tf_set = GeneSetAD::new(&adata, tf_csv, None, Some(ndecimals), None)?;
     let config = CVConfig {
         n_sample_genes: 10,
         ..Default::default()

@@ -35,8 +35,8 @@ use thiserror::Error;
 
 use crate::{
     comm::CommIfx,
-    cond_debug,
-    h5::mpio,
+    cond_debug, cond_warn,
+    h5::{io, mpio},
     util::{around, read_csv_column},
 };
 
@@ -136,7 +136,7 @@ pub fn build_gene_index(
 }
 
 impl AnnData {
-    /// Construct an AnnData object for a given path,  optional gene 
+    /// Construct an AnnData object for a given path,  optional gene
     /// name column to index with, and optional row major HDF5 file.
     pub fn new(
         path: &str,
@@ -219,7 +219,7 @@ impl AnnData {
     /// Use MPI parallel IO to block-read a column range from the
     /// row-major sibling file across all processes.
     ///
-    /// Uses [`AnnData::row_major_h5`] to read the ranges of columns with 
+    /// Uses [`AnnData::row_major_h5`] to read the ranges of columns with
     /// [`mpio::read_range_data_t`]. Otherwise, it falls back to
     /// [`AnnData::par_read_range_data`] on the column-major file.
     pub fn par_rmajor_range_data<T: H5Type + Clone>(
@@ -268,7 +268,6 @@ impl AnnData {
         cbounds: Range<usize>,
         cx: &CommIfx,
     ) -> Result<Array2<T>> {
-        // TODO::
         let ds = self.open_mpio(cx)?.dataset("X")?;
         let selection = ndarray::s![..self.nobs, cbounds];
         let rdata: Array2<T> = ds.as_reader().indi_read_slice_2d(selection)?;
@@ -343,28 +342,76 @@ impl AnnData {
     /// Read an arbitrary subset of columns of `X` and return them as
     /// a `nobs x indices.len()` matrix.
     ///
-    /// Columns are read one at a time and assembled into the output
-    /// in the order given by `indices`. Each `indices[i]` must be a
+    /// By default uses io::read2d_slice_of_cols, which reads the columns one
+    ///  at a time and assembles into the output in the order given by `indices`.
+    ///  Each `indices[i]` must be a
     /// valid column of the original `X` dataset.
+    /// If available, uses the row_major_h5 to perform row-wise reading which
+    /// enables a a faster reading
     pub fn read_submatrix<T: H5Type + Clone + Zero>(
         &self,
         indices: &[usize],
     ) -> Result<Array2<T>> {
-        // TODO:: How to do this faster?
-        let mut smat = Array2::<T>::zeros([self.nobs, indices.len()]);
-        let ds = self.open_r()?.dataset("X")?;
-        for (i, col_index) in indices.iter().enumerate() {
-            let scolumn = ndarray::s![..self.nobs, *col_index];
-            let rd_col: Array1<T> = ds.read_slice(scolumn)?;
-            smat.column_mut(i).assign(&rd_col);
+        if let Some(h5path) = self.row_major_h5.as_ref() {
+            let h5fptr = hdf5::File::open(h5path)?;
+            let r_mat =
+                io::read2d_slice_of_rows(&h5fptr, "X", indices, 0..self.nobs)?;
+            Ok(r_mat.t().to_owned())
+        } else {
+            let fx = self.open_r()?;
+            let c_mat =
+                io::read2d_slice_of_cols(&fx, "X", indices, 0..self.nobs)?;
+            Ok(c_mat)
         }
+        // TODO:: How to do this faster?
+        // let mut smat = Array2::<T>::zeros([self.nobs, indices.len()]);
+        // let ds = self.open_r()?.dataset("X")?;
+        // for (i, col_index) in indices.iter().enumerate() {
+        //     let scolumn = ndarray::s![..self.nobs, *col_index];
+        //     let rd_col: Array1<T> = ds.read_slice(scolumn)?;
+        //     smat.column_mut(i).assign(&rd_col);
+        // }
         // TODO:: use the rmajor file, if available
-        Ok(smat)
+        // Ok(smat)
     }
 
-    /// Read the columns named by `gene_ids` and return the resulting
-    /// sub-matrix. Names that are not present in the gene-id map are
-    /// silently dropped (see [`Self::get_gene_indices`]).
+    /// Using parallel HDF5, read an arbitrary subset of columns of `X`
+    /// and return them as a `nobs x indices.len()` matrix.
+    pub fn par_read_submatrix<T: H5Type + Clone + Zero>(
+        &self,
+        indices: &[usize],
+        cx: &CommIfx,
+    ) -> Result<Array2<T>> {
+        if let Some(h5path) = self.row_major_h5.as_ref() {
+            let r_mat = mpio::read2d_slice_of_rows(
+                &h5path,
+                "X",
+                &indices,
+                0..self.nobs,
+                cx,
+            )?;
+            Ok(r_mat.t().to_owned())
+        } else {
+            cond_warn!(cx.is_root(); "No row file; Switching to default sequential read");
+            self.read_submatrix(&indices)
+        }
+    }
+
+    /// Using parallel HDF5, read the expression vectors corresponding to genes
+    /// named by `gene_ids` and return the resulting sub-matrix. Names that are
+    /// not present in the gene-id map are silently dropped (see [`Self::get_gene_indices`]).
+    pub fn par_read_genes_submatrix<T: H5Type + Clone + Zero>(
+        &self,
+        gene_ids: &[String],
+        cx: &CommIfx,
+    ) -> Result<Array2<T>> {
+        let indices = self.get_gene_indices(gene_ids);
+        self.par_read_submatrix(&indices, cx)
+    }
+
+    /// Read the expression vectors corresponding to genes named by `gene_ids`
+    /// and return the resulting sub-matrix. Names that are not present in the
+    /// gene-id map are silently dropped (see [`Self::get_gene_indices`]).
     pub fn read_genes_submatrix<T: H5Type + Clone + Zero>(
         &self,
         gene_ids: &[String],
@@ -472,6 +519,7 @@ where
         gene_csv: &str,
         gene_column: Option<&str>,
         n_decimals: Option<usize>,
+        ocx: Option<&CommIfx>,
     ) -> Result<Self> {
         let gene_column = gene_column.unwrap_or("gene");
         let in_genes = read_csv_column(gene_csv, gene_column)?;
@@ -481,7 +529,11 @@ where
             .collect();
         let ngenes = genes.len();
 
-        let expr_matrix = adata.read_submatrix::<T>(&indices)?;
+        let expr_matrix = if let Some(cx) = ocx {
+            adata.par_read_submatrix(&indices, cx)?
+        } else {
+            adata.read_submatrix::<T>(&indices)?
+        };
         let expr_matrix = if let Some(n_decimals) = n_decimals {
             around(expr_matrix.view(), n_decimals)
         } else {

@@ -59,7 +59,6 @@ impl KFold {
         Self { n_splits, indices }
     }
 
-
     /// Return the `(train_indices, val_indices)` for the given `fold`.
     ///
     /// The validation slice is the fold-th block with in the `indices` and
@@ -87,12 +86,23 @@ impl KFold {
     }
 }
 
+impl Display for KFold {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "[splits: {}; Indices Size: {}]",
+            self.n_splits,
+            self.indices.len(),
+        )
+    }
+}
+
 /// Run K-fold CV with early stopping for one target gene and return
 /// the early-stopped iteration count of every fold.
 ///
 /// Builds a fresh shuffled [`KFold`] over `data_matrix.nrows()`,
-/// then trains [`config.n_folds`](CVConfig::n_folds) boosters. 
-/// Each booster uses the LightGBM JSON parameters derived from 
+/// then trains [`config.n_folds`](CVConfig::n_folds) boosters.
+/// Each booster uses the LightGBM JSON parameters derived from
 /// `config.params`. The early-stopping callback uses [`CVConfig::es_params`].
 pub fn cross_validate_target(
     data_matrix: ArrayView2<f32>,
@@ -274,12 +284,12 @@ pub fn cv_gbm(
 
 /// Per-rank state for the distributed CV loop in [`mpi_cv_gbm`].
 ///
-/// Includes: 
+/// Includes:
 /// * Reference to a [`CVConfig`] object;
 /// * the rank's slice of the global `(sampled_gene, fold)` run
 ///   list, expressed as a contiguous `Range<usize>` over
 ///   `0..n_sample_genes * n_folds` (one run per element);
-/// * a [`KFold`] cache used to share splits with the previous rank 
+/// * a [`KFold`] cache used to share splits with the previous rank
 ///   so that runs straddling a rank boundary use identical row permutations.
 struct DistCVConfig<'a> {
     /// Number of observations (rows of the expression matrix).
@@ -356,7 +366,7 @@ impl<'a> DistCVConfig<'a> {
     }
 
     /// Total number of `(gene, fold)` runs in the global loop.
-    fn _n_runs(&self) -> usize {
+    fn n_runs(&self) -> usize {
         self._nruns
     }
 
@@ -460,13 +470,30 @@ impl<'a> DistCVConfig<'a> {
     }
 }
 
+impl<'a> Display for DistCVConfig<'a> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "[ndata: {}; nruns: {}; prange: ({}, {}); last_sample: ({}, {}); \
+              cfg : {:?}]",
+            self.ndata,
+            self.n_runs(),
+            self.p_range.start,
+            self.p_range.end,
+            self.last_sample_kfold.0,
+            self.last_sample_kfold.1,
+            self.config,
+        )
+    }
+}
+
 /// Per-rank CV loop driven by a [`DistCVConfig`].
 ///
 /// Iterates over [`DistCVConfig::run_range`], reads the matching
 /// target column from `run_tgt_set` (which contains only the genes
 /// touched by this rank), and trains one [`Booster`] per run with
 /// [`train_with_early_stopping`] using the predictors from
-/// `tf_set`. 
+/// `tf_set`.
 /// Returns the per-run early-stopped iteration counts in the same
 /// order as the runs.
 fn dist_cross_validate(
@@ -524,13 +551,13 @@ pub fn mpi_cv_gbm(
     config: &CVConfig,
     mpi_ifx: &CommIfx,
 ) -> Result<CVStats> {
-    sope::cond_info!(mpi_ifx.is_root(); "START INIT CONFIG LOAD");
+    sope::cond_info!(mpi_ifx.is_root(); "START INIT CONFIG");
     let ndata = tf_set.ann_data().nobs;
     let d_config = DistCVConfig::new(ndata, config, mpi_ifx);
     let s_genes = d_config.dist_sample_genes(tf_set.ann_data().nvars, mpi_ifx)?;
     if log::log_enabled!(log::Level::Info) {
         mpi_ifx.comm().barrier();
-        sope::cond_info!(mpi_ifx.is_root(); "COMPLETE INIT CONFIG LOAD");
+        sope::cond_info!(mpi_ifx.is_root(); "COMPLETE INIT CONFIG; DistCVConfig: {}", d_config);
         sope::cond_info!(mpi_ifx.is_root(); "START LOAD TARGET DATA");
     }
     sope::cond_debug!(
@@ -576,8 +603,7 @@ pub fn mpi_cv_gbm(
     sope::cond_debug!(
         mpi_ifx.is_root(); "ALL ROUNDS : {} {:?}", all_rounds.len(), all_rounds
     );
-    let opt_gbm =
-        CVStats::new(all_rounds, config.n_sample_genes, config.n_folds);
+    let opt_gbm = CVStats::new(all_rounds, config.n_sample_genes, config.n_folds);
 
     if log::log_enabled!(log::Level::Info) {
         mpi_ifx.comm().barrier();

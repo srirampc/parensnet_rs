@@ -1,4 +1,5 @@
 h5ad_file: "./data/pbmc_scrna/0800K/pbmc800K.20K.h5ad"
+row_major_h5_file: "./data/pbmc_scrna/0800K/pbmc800K.20K.rmajor.h5"
 tf_csv_file: "data/pbmc/trrust_tf.txt"
 nroundup: 3
 output_file: "./out/pbmc800K.20K/adata.800K.20K.gbgrn.h5"
