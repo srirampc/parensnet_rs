@@ -176,11 +176,11 @@ pub fn infer_gb_network(args: &GBGRNArgs, mcx: &CommIfx) -> Result<()> {
         cv_stats.median
     };
     s_timer.info_section("GB Network::CV_GBN");
-    cond_info!(mcx.is_root(); "START GRAD BOOSTING", );
     let params = GBMParams {
         num_iterations,
-        ..GBMParams::default()
+        ..args.gbm_params.clone()
     };
+    cond_info!(mcx.is_root(); "START GRAD BOOSTING: {:?}", params );
     s_timer.reset();
     let net_edges = mpi_gradient_boosting_grn(&tf_set, mcx, params, true)?;
     s_timer.info_section("GB Network::GRN_Boost");

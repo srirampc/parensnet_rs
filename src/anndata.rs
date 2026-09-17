@@ -390,7 +390,9 @@ impl AnnData {
                 0..self.nobs,
                 cx,
             )?;
-            Ok(r_mat.t().to_owned())
+            let mut c_mat = Array2::<T>::zeros([self.nobs, indices.len()]);
+            c_mat.assign(&r_mat.t());
+            Ok(c_mat)
         } else {
             cond_warn!(cx.is_root(); "No row file; Switching to default sequential read");
             self.read_submatrix(&indices)
@@ -530,7 +532,7 @@ where
         let ngenes = genes.len();
 
         let expr_matrix = if let Some(cx) = ocx {
-            adata.par_read_submatrix(&indices, cx)?
+            adata.par_read_submatrix::<T>(&indices, cx)?
         } else {
             adata.read_submatrix::<T>(&indices)?
         };

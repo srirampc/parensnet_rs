@@ -74,6 +74,8 @@ pub fn train(
 ) -> Result<Booster> {
     let x_matrix;
     let x_label;
+    assert!(data_matrix.is_standard_layout());
+
     let (x_train, label_train) = if let Some(train_idx) = train_idx {
         x_matrix = data_matrix.select(Axis(0), train_idx);
         x_label = label.select(Axis(0), train_idx);
@@ -81,6 +83,8 @@ pub fn train(
     } else {
         (data_matrix, label)
     };
+
+    assert!(x_train.is_standard_layout());
 
     let nfeatures = x_train.shape()[1] as i32;
     let train_data = Dataset::from_slice(

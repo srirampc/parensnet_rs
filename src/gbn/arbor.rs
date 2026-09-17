@@ -27,6 +27,7 @@ use std::str::FromStr;
 
 use super::{GBMParams, train};
 use crate::{
+    cond_info,
     anndata::{AnnData, GeneSetAD},
     comm::CommIfx,
     util::block_range,
@@ -238,10 +239,12 @@ fn train_for_target(
     tgt_id: usize,
     params: &GBMParams,
 ) -> Result<Booster> {
+    assert!(tf_set.expr_matrix_ref().view().is_standard_layout());
     let params = params.as_json();
     let t_booster = if tf_set.contains(tgt_id) {
         // TODO:: Use the cache for gene_id
         let expr_mat = tf_set.expr_matrix_sub_gene_index(tgt_id)?;
+        assert!(expr_mat.is_standard_layout());
         train(expr_mat.view(), tgt_label.view(), None, &params)?
     } else {
         train(
@@ -269,8 +272,9 @@ pub fn feature_importances(
 ) -> Result<Array2<f64>> {
     let tgt_start = tgt_range.start;
     let tgt_size = tgt_range.end - tgt_range.start;
+    let notify_frac = tgt_size / 10;
     let mut tgt_importances = Array2::<f64>::zeros((tgt_size, tf_set.len()));
-    for tgt_idx in tgt_range {
+    for (idx, tgt_idx) in tgt_range.clone().enumerate() {
         let tgt_label = tgt_set.column(tgt_idx)?;
         let t_booster =
             train_for_target(tf_set, tgt_label.view(), tgt_idx, params)?;
@@ -278,6 +282,9 @@ pub fn feature_importances(
         tgt_importances
             .row_mut(tgt_idx - tgt_start)
             .assign(&Array1::from_vec(t_weights));
+        if (idx + 1) % notify_frac == 0 {
+            log::info!("Done {} Genes in {:?} ({})", idx + 1, &tgt_range, tgt_size);
+        }
     }
     Ok(tgt_importances)
 }
@@ -327,16 +334,20 @@ pub fn mpi_gradient_boosting_grn(
     let adata = tf_set.ann_data();
     let tgt_range = block_range(mpi_ifx.rank, mpi_ifx.size, adata.nvars);
     let tgt_start = tgt_range.start;
+    cond_info!(mpi_ifx.is_root(); "START FEATURE IMPORTANCES");
     let tgt_importances = if cache_tgt {
+        cond_info!(mpi_ifx.is_root(); "START BUILDING TARGET CACHE");
         let tgt_set = GeneSetAD::from_indices(
             adata,
             &tgt_range.clone().collect_vec(),
             tf_set.decimals(),
         )?;
+        cond_info!(mpi_ifx.is_root(); "COMPLETED BUILDING TARGET CACHE");
         feature_importances(tf_set, &tgt_set, tgt_range, &params)?
     } else {
         feature_importances_ad(tf_set, adata, tgt_range, &params)?
     };
+    cond_info!(mpi_ifx.is_root(); "COMPLETED FEATURE IMPORTANCES");
 
     let tf_tgt_net = TFOutEdge::from_matrix(tgt_importances, tgt_start, 0);
     Ok(tf_tgt_net)

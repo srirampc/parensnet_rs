@@ -114,12 +114,16 @@ pub struct GBMParams {
     /// [`GBMParams::default_feature_fraction`]).
     #[serde(default = "GBMParams::default_feature_fraction")]
     pub feature_fraction: f32,
+
+    // Force column-wise threading 
+    #[serde(default = "GBMParams::default_force_col")]
+    pub force_col_wise: bool,
 }
 
 impl GBMParams {
     /// Default for [`Self::verbose`] (`1`).
     fn default_verbose() -> i32 {
-        1
+        -1
     }
 
     /// Default for [`Self::num_threads`] (`0`, let LightGBM choose).
@@ -156,6 +160,11 @@ impl GBMParams {
     fn default_metric() -> String {
         "rmse".to_string()
     }
+
+    /// Default for [`Self::force_col_wise`] (`true`)
+    fn default_force_col() -> bool {
+        true
+    }
 }
 
 impl Default for GBMParams {
@@ -169,6 +178,7 @@ impl Default for GBMParams {
             bagging_freq: Self::default_bagging_freq(),
             metric: Self::default_metric(),
             feature_fraction: Self::default_feature_fraction(),
+            force_col_wise: Self::default_force_col(),
         }
     }
 }
