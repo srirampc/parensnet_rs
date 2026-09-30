@@ -19,6 +19,7 @@ def load_puc(in_file: str, ngenes: int) -> npt.NDArray:
 
 def puc2pidc(puc_scores: npt.NDArray) -> npt.NDArray:
     pidc_scores = np.zeros(puc_scores.shape)
+    return pidc_scores
 
 
 def main(args):

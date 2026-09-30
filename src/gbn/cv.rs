@@ -324,15 +324,12 @@ impl<'a> DistCVConfig<'a> {
     fn new(ndata: usize, config: &'a CVConfig, cifx: &CommIfx) -> Self {
         let nruns = config.n_sample_genes * config.n_folds;
         let prev_last_sample = if cifx.rank > 0 {
-            Some(
-                block_high(cifx.rank - 1, cifx.size, nruns)
-                    / config.n_sample_genes,
-            )
+            Some(block_high(cifx.rank - 1, cifx.size, nruns) / config.n_folds)
         } else {
             None
         };
         let first_sample =
-            block_low(cifx.rank, cifx.size, ndata) / config.n_sample_genes;
+            block_low(cifx.rank, cifx.size, nruns) / config.n_folds;
         let last_kfold = KFold::new(ndata, config.n_folds, true);
         let prev_indices = right_shift_vec(
             if prev_last_sample.is_some_and(|x| x == first_sample) {
@@ -359,7 +356,7 @@ impl<'a> DistCVConfig<'a> {
             p_range: block_range(cifx.rank, cifx.size, nruns),
             current_sample_kfold: RefCell::new((first_sample, current_kfold)),
             last_sample_kfold: (
-                block_high(cifx.rank, cifx.size, ndata) / config.n_sample_genes,
+                block_high(cifx.rank, cifx.size, nruns) / config.n_folds,
                 last_kfold,
             ),
         }
