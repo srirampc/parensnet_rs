@@ -35,7 +35,7 @@ use thiserror::Error;
 
 use crate::{
     comm::CommIfx,
-    cond_debug, cond_warn,
+    cond_info, cond_debug, cond_warn,
     h5::{io, mpio},
     util::{around, read_csv_column},
 };
@@ -105,7 +105,7 @@ pub fn xds_dimensions(ad_fname: &str) -> Result<(usize, usize)> {
 /// if that fails, falls back to ASCII (`VarLenAscii`).
 pub fn var_gene_names(h5_fptr: &File, index_column: &str) -> Result<Vec<String>> {
     let ds_path = format!("var/{}", index_column);
-    let ds = h5_fptr.dataset(ds_path.as_str())?;
+    let ds = io::get_group_ds(&h5_fptr, &ds_path)?;
     let raw_uni = ds.read_raw::<VarLenUnicode>();
     match raw_uni {
         Result::Ok(rvec) => {
@@ -532,6 +532,7 @@ where
         let ngenes = genes.len();
 
         let expr_matrix = if let Some(cx) = ocx {
+            cond_info!(cx.is_root(); "Loading matrix ({} x {})" ,ngenes, adata.nobs);
             adata.par_read_submatrix::<T>(&indices, cx)?
         } else {
             adata.read_submatrix::<T>(&indices)?

@@ -1,0 +1,10 @@
+h5ad_file: "./data/covid_atlas/dis_scement_10k_full_intersect.h5ad"
+row_major_h5_file: "./data/covid_atlas/dis_scement_10k_full_intersect.rmajor.h5"
+tf_csv_file: "data/pbmc/trrust_tf.txt"
+nroundup: 3
+output_file: "./out/covid.10K/covid.10K.16K.gb_grn.h5"
+mode: gb_grn
+gbm_params:
+  verbose: 0
+  num_threads: 2
+n_sample_genes: 500
