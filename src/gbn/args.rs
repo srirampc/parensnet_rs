@@ -115,7 +115,7 @@ pub struct GBMParams {
     #[serde(default = "GBMParams::default_feature_fraction")]
     pub feature_fraction: f32,
 
-    // Force column-wise threading 
+    // Force column-wise threading
     #[serde(default = "GBMParams::default_force_col")]
     pub force_col_wise: bool,
 }
@@ -259,6 +259,21 @@ pub struct CVConfig {
     /// overrides `early_stopping_rounds` and `num_iterations` from
     /// the corresponding fields above).
     pub params: GBMParams,
+    /// Base seed for the deterministic per-gene K-fold permutations
+    /// used by the CV loops. Every rank derives the same shuffle for
+    /// a given sampled gene from this seed, so fold splits are
+    /// reproducible and identical across ranks. Default `72` (see
+    /// [`CVConfig::default_cv_seed`]).
+    #[serde(default = "CVConfig::default_cv_seed")]
+    pub cv_seed: u64,
+    /// Number of worker threads each rank uses to process its slice
+    /// of the CV run list. `0` means "one thread per available CPU
+    /// core" ([`std::thread::available_parallelism`]); the default is
+    /// `1` (sequential, see [`CVConfig::default_n_threads`]). When this
+    /// is greater than `1`, the LightGBM thread count is forced to `1`
+    /// so the two levels of parallelism do not oversubscribe cores.
+    #[serde(default = "CVConfig::default_n_threads")]
+    pub n_threads: usize,
 }
 
 impl Default for CVConfig {
@@ -272,6 +287,8 @@ impl Default for CVConfig {
             max_empty_rounds: 5,
             score_tolerance: 1e-4,
             params: GBMParams::default(),
+            cv_seed: Self::default_cv_seed(),
+            n_threads: Self::default_n_threads(),
         }
     }
 }
@@ -286,6 +303,17 @@ impl CVConfig {
             "max_empty_rounds": self.max_empty_rounds,
             "score_tolerance": self.score_tolerance,
         }}
+    }
+
+    /// Default for [`Self::cv_seed`] (`72`, matching the fixed
+    /// LightGBM seed emitted by [`GBMParams::as_json_with_seed`]).
+    fn default_cv_seed() -> u64 {
+        72
+    }
+
+    /// Default for [`Self::n_threads`] (`1`, fully sequential).
+    fn default_n_threads() -> usize {
+        1
     }
 }
 
@@ -309,6 +337,12 @@ fn default_filter() -> Option<f64> {
 /// Default for [`GBGRNArgs::n_sample_genes`] (`200`).
 fn default_n_samples() -> usize {
     200
+}
+
+/// Default for [`GBGRNArgs::n_threads`] (`1`); the CV stage runs
+/// sequentially on each rank unless explicitly overridden.
+fn default_n_threads() -> usize {
+    1
 }
 
 /// Default for [`GBGRNArgs::skip_cv`] (`false`); run the CV step.
@@ -381,6 +415,12 @@ pub struct GBGRNArgs {
     /// `200` (see [`default_n_samples`]).
     #[serde(default = "default_n_samples")]
     pub n_sample_genes: usize,
+
+    /// Number of worker threads each rank uses for the CV stage (see
+    /// [`CVConfig::n_threads`]). `0` means "one thread per available
+    /// core"; default `1` (sequential, see [`default_n_threads`]).
+    #[serde(default = "default_n_threads")]
+    pub n_threads: usize,
 
     /// When `true`, skip the CV stage and use
     /// [`Self::num_iterations`] directly for the production run.

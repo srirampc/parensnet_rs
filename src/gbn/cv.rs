@@ -15,21 +15,23 @@
 //! Both share [`cross_validate_target`], which performs the per-gene
 //! K-fold loop, and [`KFold`], which shuffles a row index vector and
 //! emits the train/validation split for a given fold.
+//!
+//! Fold permutations are seeded deterministically per sampled gene
+//! (see [`CVConfig::cv_seed`]), so splits are reproducible and
+//! identical on every rank without cross-rank communication.
 
 use anyhow::Result;
 use mpi::traits::CommunicatorCollectives;
 use ndarray::{ArrayView1, ArrayView2};
 use rand::seq::SliceRandom;
-use sope::{
-    bcast::bcast, collective::allgatherv_full_vec, shift::right_shift_vec,
-};
-use std::{cell::RefCell, fmt::Display, ops::Range};
+use sope::{bcast::bcast, collective::allgatherv_full_vec};
+use std::{fmt::Display, ops::Range};
 
 use super::{CVConfig, GBMParams, train_with_early_stopping};
 use crate::{
     anndata::{AnnData, GeneSetAD},
     comm::CommIfx,
-    util::{Vec2d, block_high, block_low, block_range},
+    util::{Vec2d, block_range},
 };
 
 /// Sklearn-style K-fold splitter used by the CV loops.
@@ -56,6 +58,20 @@ impl KFold {
             indices.shuffle(&mut rng);
         }
 
+        Self { n_splits, indices }
+    }
+
+    /// Build a [`KFold`] whose row permutation is seeded
+    /// deterministically from `seed`.
+    ///
+    /// Unlike [`Self::new`], this is reproducible: the same
+    /// `(ndata, n_splits, seed)` always yields the same permutation,
+    /// on any rank or thread.
+    pub fn from_seed(ndata: usize, n_splits: usize, seed: u64) -> Self {
+        use rand::{SeedableRng, rngs::StdRng};
+        let mut indices: Vec<usize> = (0..ndata).collect();
+        let mut rng = StdRng::seed_from_u64(seed);
+        indices.shuffle(&mut rng);
         Self { n_splits, indices }
     }
 
@@ -282,15 +298,47 @@ pub fn cv_gbm(
     ))
 }
 
+/// Mix a base seed with an index into a well-distributed `u64` seed
+/// (splitmix64 finalizer). Used to derive an independent — yet fully
+/// deterministic — shuffle seed per sampled gene.
+fn mix_seed(base: u64, id: u64) -> u64 {
+    let mut z = base ^ id.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    z ^ (z >> 31)
+}
+
+/// A contiguous stretch of runs belonging to a single sampled gene.
+///
+/// Because the global run list is gene-major
+/// (`run_id = sample_id * n_folds + fold_id`), the runs a rank owns
+/// decompose into at most one partial segment for the first gene, one
+/// per fully-owned gene, and at most one partial segment for the last
+/// gene. Every run in a segment shares the same sampled gene, so a
+/// single [`KFold`] can be built and reused across all its folds.
+struct RunSegment {
+    /// Index of the sampled gene (`0..n_sample_genes`).
+    sample_id: usize,
+    /// First fold (inclusive) of this segment within the gene.
+    fstart: usize,
+    /// Last fold (exclusive) of this segment within the gene.
+    fend: usize,
+    /// Offset of this segment's first run within the rank's
+    /// [`DistCVConfig::run_range`].
+    offset: usize,
+}
+
 /// Per-rank state for the distributed CV loop in [`mpi_cv_gbm`].
 ///
-/// Includes:
-/// * Reference to a [`CVConfig`] object;
-/// * the rank's slice of the global `(sampled_gene, fold)` run
-///   list, expressed as a contiguous `Range<usize>` over
-///   `0..n_sample_genes * n_folds` (one run per element);
-/// * a [`KFold`] cache used to share splits with the previous rank
-///   so that runs straddling a rank boundary use identical row permutations.
+/// Holds a reference to the [`CVConfig`] plus the rank's slice of the
+/// global `(sampled_gene, fold)` run list, expressed as a contiguous
+/// `Range<usize>` over `0..n_sample_genes * n_folds` (one run per
+/// element, gene-major).
+///
+/// Fold splits are derived deterministically from [`CVConfig::cv_seed`]
+/// and the sampled-gene index (see [`Self::kfold_for`]), so every rank
+/// computes the *same* row permutation for a given gene without any
+/// cross-rank communication.
 struct DistCVConfig<'a> {
     /// Number of observations (rows of the expression matrix).
     ndata: usize,
@@ -301,64 +349,22 @@ struct DistCVConfig<'a> {
     p_range: Range<usize>,
     /// Borrowed CV configuration.
     config: &'a CVConfig,
-    /// `(sample_id, kfold)` pair for the sample currently being
-    /// processed. Wrapped in [`RefCell`] so [`Self::fold_split_for`]
-    /// can re-key it when crossing a sample boundary.
-    current_sample_kfold: RefCell<(usize, KFold)>,
-    /// `(sample_id, kfold)` pair for the rank's last sample. Built
-    /// once at construction time and shifted to the next rank so
-    /// the boundary sample is processed with identical splits on
-    /// both sides.
-    last_sample_kfold: (usize, KFold),
 }
 
 impl<'a> DistCVConfig<'a> {
     /// Build the per-rank state.
     ///
-    /// Computes the rank's range of fold-runs  among
-    /// `n_sample_genes * n_folds` possible fold-runs,
-    /// constructs the rank's `last_sample` [`KFold`] , and
-    /// uses [`right_shift_vec`] to pull the previous rank's last
-    /// `KFold` indices into this rank's `current_sample_kfold` when
-    /// the two sample IDs match.
+    /// Computes the rank's contiguous range of fold-runs among the
+    /// `n_sample_genes * n_folds` global runs. No cross-rank
+    /// communication is needed: the per-gene fold permutations are
+    /// re-derived deterministically from [`CVConfig::cv_seed`].
     fn new(ndata: usize, config: &'a CVConfig, cifx: &CommIfx) -> Self {
         let nruns = config.n_sample_genes * config.n_folds;
-        let prev_last_sample = if cifx.rank > 0 {
-            Some(block_high(cifx.rank - 1, cifx.size, nruns) / config.n_folds)
-        } else {
-            None
-        };
-        let first_sample =
-            block_low(cifx.rank, cifx.size, nruns) / config.n_folds;
-        let last_kfold = KFold::new(ndata, config.n_folds, true);
-        let prev_indices = right_shift_vec(
-            if prev_last_sample.is_some_and(|x| x == first_sample) {
-                &last_kfold.indices
-            } else {
-                &[]
-            },
-            cifx.comm(),
-        );
-        let current_kfold = if let Some(first_indices) = prev_indices
-            && !first_indices.is_empty()
-        {
-            KFold {
-                n_splits: config.n_folds,
-                indices: first_indices,
-            }
-        } else {
-            KFold::new(ndata, config.n_folds, true)
-        };
         Self {
             ndata,
             _nruns: nruns,
             config,
             p_range: block_range(cifx.rank, cifx.size, nruns),
-            current_sample_kfold: RefCell::new((first_sample, current_kfold)),
-            last_sample_kfold: (
-                block_high(cifx.rank, cifx.size, nruns) / config.n_folds,
-                last_kfold,
-            ),
         }
     }
 
@@ -370,11 +376,6 @@ impl<'a> DistCVConfig<'a> {
     /// Map a global `run_id` to the index of its sampled gene.
     fn sample_id(&self, run_id: usize) -> usize {
         run_id / self.config.n_folds
-    }
-
-    /// Map a global `run_id` to its fold index.
-    fn fold_id(&self, run_id: usize) -> usize {
-        run_id % self.config.n_folds
     }
 
     /// Half-open run-index range owned by this rank.
@@ -429,36 +430,87 @@ impl<'a> DistCVConfig<'a> {
         Ok(s_genes)
     }
 
-    /// Construct the [`GBMParams`] used by every CV booster.
-    fn gbm_params(&self) -> GBMParams {
-        GBMParams {
-            early_stopping_rounds: self.config.early_stopping_rounds,
-            num_iterations: self.config.max_rounds,
-            ..self.config.params.clone()
+    /// Number of worker threads to use for the rank-local CV loop.
+    ///
+    /// A configured value of `0` means "one thread per available
+    /// core"; the result is always at least `1`.
+    fn n_threads(&self) -> usize {
+        match self.config.n_threads {
+            0 => std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1),
+            n => n,
         }
     }
 
-    /// Return the `(train, val)` split for the given global `run_id`.
+    /// Construct the [`GBMParams`] used by every CV booster.
     ///
-    /// Reuses the cached [`KFold`] when `run_id` belongs to either
-    /// the rank's `last_sample` or the currently active sample.
-    /// Otherwise builds a fresh [`KFold`] and updates the
-    /// `current_sample_kfold` cache.
-    fn fold_split_for(&self, run_id: usize) -> (Vec<usize>, Vec<usize>) {
-        let sample_id: usize = self.sample_id(run_id);
-        let fold_id: usize = self.fold_id(run_id);
-        let last = &self.last_sample_kfold;
-        if sample_id == last.0 {
-            last.1.split_for(fold_id)
-        } else if sample_id == self.current_sample_kfold.borrow().0 {
-            self.current_sample_kfold.borrow().1.split_for(fold_id)
-        } else {
-            self.current_sample_kfold.replace((
-                sample_id,
-                KFold::new(self.ndata, self.config.n_folds, true),
-            ));
-            self.current_sample_kfold.borrow().1.split_for(fold_id)
+    /// When the rank-local loop is multi-threaded ([`Self::n_threads`]
+    /// is greater than `1`), LightGBM's own thread count is forced to
+    /// `1` so the two levels of parallelism do not oversubscribe the
+    /// cores.
+    fn gbm_params(&self) -> GBMParams {
+        let mut params = GBMParams {
+            early_stopping_rounds: self.config.early_stopping_rounds,
+            num_iterations: self.config.max_rounds,
+            ..self.config.params.clone()
+        };
+        if self.n_threads() > 1 {
+            params.num_threads = 1;
         }
+        params
+    }
+
+    /// Deterministic shuffle seed for a sampled gene, derived from
+    /// [`CVConfig::cv_seed`] and the sampled-gene index.
+    fn sample_seed(&self, sample_id: usize) -> u64 {
+        mix_seed(self.config.cv_seed, sample_id as u64)
+    }
+
+    /// Build the deterministic [`KFold`] for a sampled gene.
+    ///
+    /// The same `(cv_seed, sample_id)` yields the same permutation on
+    /// every rank, so a gene's folds split consistently even when its
+    /// runs straddle a rank boundary.
+    fn kfold_for(&self, sample_id: usize) -> KFold {
+        KFold::from_seed(
+            self.ndata,
+            self.config.n_folds,
+            self.sample_seed(sample_id),
+        )
+    }
+
+    /// Decompose this rank's [`Self::run_range`] into gene-contiguous
+    /// [`RunSegment`]s, in run-ascending order.
+    ///
+    /// Each segment covers the folds of one sampled gene that fall
+    /// inside the rank's range; `offset` places the segment's first run
+    /// within the rank-local result vector. The segments therefore
+    /// tile `0..run_range().len()` without gaps or overlaps, which lets
+    /// [`dist_cross_validate`] scatter results by offset instead of
+    /// appending in order.
+    fn segments(&self) -> Vec<RunSegment> {
+        let nf = self.config.n_folds;
+        let p = self.run_range();
+        if p.start >= p.end {
+            return Vec::new();
+        }
+
+        let first_sample = p.start / nf;
+        let last_sample = (p.end - 1) / nf;
+        (first_sample..=last_sample)
+            .map(|sample_id| {
+                let gene_start = sample_id * nf;
+                let fstart = p.start.max(gene_start) - gene_start;
+                let fend = p.end.min(gene_start + nf) - gene_start;
+                RunSegment {
+                    sample_id,
+                    fstart,
+                    fend,
+                    offset: gene_start + fstart - p.start,
+                }
+            })
+            .collect()
     }
 
     /// Forward to [`CVConfig::es_params`].
@@ -471,28 +523,90 @@ impl<'a> Display for DistCVConfig<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "[ndata: {}; nruns: {}; prange: ({}, {}); last_sample: ({}, {}); \
-              cfg : {:?}]",
+            "[ndata: {}; nruns: {}; prange: ({}, {}); cfg : {:?}]",
             self.ndata,
             self.n_runs(),
             self.p_range.start,
             self.p_range.end,
-            self.last_sample_kfold.0,
-            self.last_sample_kfold.1,
             self.config,
         )
     }
 }
 
+/// Train the CV boosters for a contiguous slice of `segments` and
+/// return `(offset, iterations)` pairs, one per run in the slice.
+///
+/// Each segment builds one deterministic [`KFold`] for its sampled gene
+/// (see [`DistCVConfig::kfold_for`]) and reuses it across all of the
+/// gene's folds, reads the matching target column from `run_tgt_set`
+/// (which contains only the genes touched by this rank), and trains one
+/// [`Booster`] per fold with [`train_with_early_stopping`].
+///
+/// `params` / `es_params` are precomputed by the caller so they can be
+/// shared read-only across worker threads. No MPI or HDF5 calls are made
+/// here, so this is safe to run on a worker thread; results are returned
+/// as `(offset, iterations)` pairs so the caller can scatter them
+/// without depending on thread scheduling order.
+fn run_segment_chunk(
+    tf_set: &GeneSetAD<f32>,
+    run_tgt_set: &GeneSetAD<f32>,
+    tgt_genes: &[usize],
+    config: &DistCVConfig,
+    params: &serde_json::Value,
+    es_params: &serde_json::Value,
+    segments: &[RunSegment],
+) -> Result<Vec<(usize, usize)>> {
+    let n_runs: usize = segments.iter().map(|s| s.fend - s.fstart).sum();
+    let mut results = Vec::with_capacity(n_runs);
+
+    for seg in segments {
+        let tgt_id = tgt_genes[seg.sample_id];
+        let tgt_label = run_tgt_set.column(tgt_id)?;
+        // Build the fold permutation once per gene, not once per fold.
+        let kfold = config.kfold_for(seg.sample_id);
+        // The predictor matrix (all genes, or all TFs when the target is
+        // itself a TF) is likewise fixed for the whole segment.
+        let expr_mat = if tf_set.contains(tgt_id) {
+            // TODO:: Use the cache for gene_id
+            Some(tf_set.expr_matrix_sub_gene_index(tgt_id)?)
+        } else {
+            None
+        };
+
+        for fold in seg.fstart..seg.fend {
+            let (train_idx, val_idx) = kfold.split_for(fold);
+            let expr_view = match &expr_mat {
+                Some(mat) => mat.view(),
+                None => tf_set.expr_matrix_ref().view(),
+            };
+            let cv_iters = train_with_early_stopping(
+                expr_view,
+                tgt_label.view(),
+                (&train_idx, &val_idx),
+                params,
+                es_params,
+            )?;
+            results.push((
+                seg.offset + (fold - seg.fstart),
+                cv_iters.num_iterations() as usize,
+            ));
+        }
+    }
+    Ok(results)
+}
+
 /// Per-rank CV loop driven by a [`DistCVConfig`].
 ///
-/// Iterates over [`DistCVConfig::run_range`], reads the matching
-/// target column from `run_tgt_set` (which contains only the genes
-/// touched by this rank), and trains one [`Booster`] per run with
-/// [`train_with_early_stopping`] using the predictors from
-/// `tf_set`.
-/// Returns the per-run early-stopped iteration counts in the same
-/// order as the runs.
+/// Splits the rank's [`DistCVConfig::segments`] (gene-contiguous run
+/// stretches) into contiguous chunks and processes them one chunk per
+/// worker thread when [`CVConfig::n_threads`] is greater than one, or on
+/// the calling thread otherwise. Because chunks are contiguous, each
+/// sampled gene's [`KFold`] is built once per thread.
+///
+/// Results are scattered by run offset, so the returned counts are in
+/// run-ascending order regardless of how the work was scheduled (the
+/// order [`allgatherv_full_vec`] concatenates by rank). No MPI calls are
+/// made in the workers, so all collectives stay on the caller's thread.
 fn dist_cross_validate(
     tf_set: &GeneSetAD<f32>,
     run_tgt_set: &GeneSetAD<f32>,
@@ -503,34 +617,65 @@ fn dist_cross_validate(
     let params = gb_params.as_json_with_seed();
     let es_params = config.es_params();
 
-    let mut best_iterations: Vec<usize> = Vec::new();
-    for ((train_idx, val_idx), tgt_id) in config.run_range().map(|run_id| {
-        (
-            config.fold_split_for(run_id),
-            tgt_genes[config.sample_id(run_id)],
+    let segments = config.segments();
+    let n_runs = config.run_range().len();
+    let mut best_iterations: Vec<usize> = vec![0; n_runs];
+    if n_runs == 0 {
+        return Ok(best_iterations);
+    }
+
+    // Never spawn more threads than there are segments to process.
+    let n_threads = config.n_threads().min(segments.len()).max(1);
+
+    let chunk_results: Result<Vec<Vec<(usize, usize)>>> = if n_threads == 1 {
+        // Sequential fast path: no scoped threads, no extra bookkeeping.
+        run_segment_chunk(
+            tf_set,
+            run_tgt_set,
+            tgt_genes,
+            config,
+            &params,
+            &es_params,
+            &segments,
         )
-    }) {
-        let tgt_label = run_tgt_set.column(tgt_id)?;
-        let cv_iters = if tf_set.contains(tgt_id) {
-            // TODO:: Use the cache for gene_id
-            let expr_mat = tf_set.expr_matrix_sub_gene_index(tgt_id)?;
-            train_with_early_stopping(
-                expr_mat.view(),
-                tgt_label.view(),
-                (&train_idx, &val_idx),
-                &params,
-                &es_params,
-            )?
-        } else {
-            train_with_early_stopping(
-                tf_set.expr_matrix_ref().view(),
-                tgt_label.view(),
-                (&train_idx, &val_idx),
-                &params,
-                &es_params,
-            )?
-        };
-        best_iterations.push(cv_iters.num_iterations() as usize);
+        .map(|r| vec![r])
+    } else {
+        let chunk_size = segments.len().div_ceil(n_threads);
+        let params_ref = &params;
+        let es_params_ref = &es_params;
+        std::thread::scope(|scope| {
+            let handles: Vec<_> = segments
+                .chunks(chunk_size)
+                .map(|chunk| {
+                    scope.spawn(move || {
+                        run_segment_chunk(
+                            tf_set,
+                            run_tgt_set,
+                            tgt_genes,
+                            config,
+                            params_ref,
+                            es_params_ref,
+                            chunk,
+                        )
+                    })
+                })
+                .collect();
+
+            let mut out = Vec::with_capacity(handles.len());
+            for handle in handles {
+                match handle.join() {
+                    Ok(res) => out.push(res?),
+                    Err(_) => anyhow::bail!("CV worker thread panicked"),
+                }
+            }
+            Ok(out)
+        })
+    };
+
+    for chunk in chunk_results? {
+        for (offset, iters) in chunk {
+            best_iterations[offset] = iters;
+        }
     }
     Ok(best_iterations)
 }

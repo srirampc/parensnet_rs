@@ -264,8 +264,8 @@ pub fn half_split_ranges<T: Integer + Copy + FromPrimitive>(
 /// with the running sum  uniformly scaled with `scale`.
 ///
 /// Iterates `in_itr`, multiplying the running total by `scale` before
-/// emitting each element. 
-/// The output sequence satisfies `out[i] = scale * sum(in[0..i])`. 
+/// emitting each element.
+/// The output sequence satisfies `out[i] = scale * sum(in[0..i])`.
 pub fn exc_prefix_sum<ItrT, T, SeqT>(in_itr: ItrT, scale: T) -> SeqT
 where
     ItrT: Iterator<Item = T>,
@@ -284,7 +284,7 @@ where
 /// Inclusive prefix sum (i-th sum includes i-th entry) with the running sum
 /// uniformly scaled with `scale`.
 ///
-/// The output sequence satisfies `out[i] = scale * sum(in[0..=i])`. 
+/// The output sequence satisfies `out[i] = scale * sum(in[0..=i])`.
 pub fn inc_prefix_sum<ItrT, T, SeqT>(in_itr: ItrT, scale: T) -> SeqT
 where
     ItrT: Iterator<Item = T>,
@@ -306,7 +306,7 @@ where
 /// Only entries with `i < j` (i.e. above the diagonal) are valid, and
 /// the diagonal itself is not included in the enumeration.
 /// Example showing results for of square matrix of side, n=5:
-/// ```ignore 
+/// ```ignore
 ///     i/j   0 1 2 3 4
 ///     0    [. 0 1 2 3]
 ///     1    [- . 4 5 6]
@@ -378,12 +378,14 @@ where
 /// First (inclusive) global index owned by `rank` in a block
 /// distribution of `n` elements over `p` processors.
 pub fn block_low(rank: i32, p: i32, n: usize) -> usize {
+    assert!(n >= (p as usize));
     ((rank as usize) * n) / (p as usize)
 }
 
 /// Last (inclusive) global index owned by `rank` in a block
 /// distribution of `n` elements over `p` processors.
 pub fn block_high(rank: i32, p: i32, n: usize) -> usize {
+    assert!(n >= (p as usize));
     ((((rank as usize) + 1) * n) / (p as usize)) - 1
 }
 
@@ -435,7 +437,7 @@ pub fn all_block_ranges_2d(p: i32, n: usize) -> Vec2d<RangePair<usize>> {
     )
 }
 
-/// Returns the all the upper triangular blocks of a pair-wise distribution of 
+/// Returns the all the upper triangular blocks of a pair-wise distribution of
 /// n data points.
 ///
 /// Includes all pairs (i, j) for i in 0..n and j in 0..n
@@ -484,7 +486,7 @@ pub fn diag_block_ranges(p: i32, n: usize) -> Vec<RangePair<usize>> {
 ///
 /// `offset = 0` returns the main diagonal `[(0,0), (1,1), ...]`;
 /// `offset = k > 0` returns `[(0, k), (1, k+1), ...]` of length
-/// `n - k`. 
+/// `n - k`.
 /// Used by [`diag_batch_distribution`] to enumerate the
 /// off-diagonals of the per-batch assignment.
 pub fn matrix_diagonal(n: usize, offset: usize) -> Vec<(usize, usize)> {
@@ -492,7 +494,7 @@ pub fn matrix_diagonal(n: usize, offset: usize) -> Vec<(usize, usize)> {
 }
 
 /// Distribute pair-wise work in batches across p processes by distributing
-/// across the diagonals. 
+/// across the diagonals.
 ///
 /// The distribution makes sure that each batch has exactly p blocks.
 /// Example below showing distribution for 5 processors running in 3 batches.
@@ -837,11 +839,11 @@ pub struct UniqCounts<T, S> {
 
 /// Compute the unique values and per-value counts for a sorted slice.
 ///
-/// Ues a generic count type `S`  so callers can ask for either integer or 
+/// Ues a generic count type `S`  so callers can ask for either integer or
 /// floating multiplicities.
 /// NOTE:: `srt_data` __MUST__ already be sorted with respect to `PartialEq` so
 /// that equal elements appear consecutively (the implementation relies
-/// on `Vec::dedup`). 
+/// on `Vec::dedup`).
 pub fn unique<T, S>(srt_data: &[T]) -> UniqCounts<T, S>
 where
     T: PartialEq + Clone + Debug,
@@ -896,7 +898,7 @@ where
 ///
 /// `f_csv` is the path to a CSV with a header row, and `column` is the
 /// name of the column to extract. Returns the values of that column in
-/// row order. 
+/// row order.
 /// Fails with [`UtilError::MissingColumnError`] if the column name is
 /// not present in the header. However, parsing errors are silently skipped.
 pub fn read_csv_column(f_csv: &str, column: &str) -> Result<Vec<String>> {
@@ -922,12 +924,12 @@ pub fn read_csv_column(f_csv: &str, column: &str) -> Result<Vec<String>> {
     Ok(rvec)
 }
 
-/// Give a pair (s_range, t_range),  build an `N x 2` matrix of 
+/// Give a pair (s_range, t_range),  build an `N x 2` matrix of
 /// all `(src, tgt)` pairs in `s_range x t_range` with `src < tgt`.
 ///
-/// Returns the pairs as 2D array with two columns, whose first column is 
+/// Returns the pairs as 2D array with two columns, whose first column is
 /// the source index and second column is the target index.
-/// Indices are used to enumerate the unordered pair work inside a 2-D block. 
+/// Indices are used to enumerate the unordered pair work inside a 2-D block.
 pub fn pair_indices<T>(st_ranges: RangePair<usize>) -> Array2<T>
 where
     T: Integer + AddAssign + FromPrimitive + Clone,
@@ -949,8 +951,6 @@ where
         .assign(&Array1::from_vec(t_vec));
     st_arr
 }
-
-
 
 /// Container for storing a sparse matrix result as index/value pairs.
 ///
@@ -1011,8 +1011,6 @@ impl<T: Clone + Zero, S: Clone + Zero> IdVResults<T, S> {
         Self::new(pindices, preds)
     }
 }
-
-
 
 #[cfg(test)]
 mod tests {

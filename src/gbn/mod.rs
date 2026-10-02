@@ -81,6 +81,7 @@ fn mpi_cv_gbn_for(
 
     let config = CVConfig {
         n_sample_genes: args.n_sample_genes,
+        n_threads: args.n_threads,
         params,
         ..Default::default()
     };
